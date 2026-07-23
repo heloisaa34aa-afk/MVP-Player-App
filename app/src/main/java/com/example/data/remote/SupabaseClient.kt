@@ -146,16 +146,29 @@ object SupabaseManager {
     suspend fun getTvByToken(token: String): TvDto? {
         return try {
             val normalized = token.trim().uppercase().filter { it.isLetterOrDigit() }
-            Log.d(TAG, "[ENTRY] getTvByToken - Token: $token, Normalized: $normalized")
-            val result = supabaseClient.postgrest["tvs"].select {
+            Log.d(TAG, "[ENTRY] getTvByToken - Token recebido: '$token', Token normalizado: '$normalized'")
+            
+            Log.d(TAG, "[DEBUG] Consulta enviada ao Supabase para a tabela 'tvs' filtrando token='$normalized'")
+            val response = supabaseClient.postgrest["tvs"].select {
                 filter {
                     eq("token", normalized)
                 }
-            }.decodeSingleOrNull<TvDto>()
-            Log.d(TAG, "[EXIT] getTvByToken - Result: $result")
+            }
+            
+            Log.d(TAG, "[DEBUG] Resposta bruta recebida do Supabase: ${response.data}")
+            
+            val result = response.decodeSingleOrNull<TvDto>()
+            
+            if (result != null) {
+                Log.d(TAG, "[EXIT] TV encontrada: $result")
+            } else {
+                Log.d(TAG, "[EXIT] TV não encontrada (decodeSingleOrNull retornou null)")
+                Log.d(TAG, "[DEBUG] Motivo provável da falha: O token não existe, a resposta está vazia '[]', ou há restrições de RLS (Row Level Security) impedindo a leitura.")
+            }
+            
             result
         } catch (e: Exception) {
-            Log.e(TAG, "[ERROR] getTvByToken failed", e)
+            Log.e(TAG, "[ERROR] getTvByToken falhou com a seguinte exceção:", e)
             null
         }
     }
@@ -163,15 +176,17 @@ object SupabaseManager {
     suspend fun getTvById(id: String): TvDto? {
         return try {
             Log.d(TAG, "[ENTRY] getTvById - ID: $id")
-            val result = supabaseClient.postgrest["tvs"].select {
+            val response = supabaseClient.postgrest["tvs"].select {
                 filter {
                     eq("id", id)
                 }
-            }.decodeSingleOrNull<TvDto>()
+            }
+            Log.d(TAG, "[DEBUG] Resposta bruta (tvs): ${response.data}")
+            val result = response.decodeSingleOrNull<TvDto>()
             Log.d(TAG, "[EXIT] getTvById - Result: $result")
             result
         } catch (e: Exception) {
-            Log.e(TAG, "[ERROR] getTvById failed for ID: $id", e)
+            Log.e(TAG, "[ERROR] getTvById failed for ID: $id com a seguinte exceção:", e)
             null
         }
     }
@@ -179,15 +194,17 @@ object SupabaseManager {
     suspend fun getClienteById(id: String): ClienteDto? {
         return try {
             Log.d(TAG, "[ENTRY] getClienteById - ID: $id")
-            val result = supabaseClient.postgrest["clientes"].select {
+            val response = supabaseClient.postgrest["clientes"].select {
                 filter {
                     eq("id", id)
                 }
-            }.decodeSingleOrNull<ClienteDto>()
+            }
+            Log.d(TAG, "[DEBUG] Resposta bruta (clientes): ${response.data}")
+            val result = response.decodeSingleOrNull<ClienteDto>()
             Log.d(TAG, "[EXIT] getClienteById - Result: $result")
             result
         } catch (e: Exception) {
-            Log.e(TAG, "[ERROR] getClienteById failed for ID: $id", e)
+            Log.e(TAG, "[ERROR] getClienteById failed for ID: $id com a seguinte exceção:", e)
             null
         }
     }
@@ -195,15 +212,17 @@ object SupabaseManager {
     suspend fun getPlaylistById(id: String): PlaylistDto? {
         return try {
             Log.d(TAG, "[ENTRY] getPlaylistById - ID: $id")
-            val result = supabaseClient.postgrest["playlists"].select {
+            val response = supabaseClient.postgrest["playlists"].select {
                 filter {
                     eq("id", id)
                 }
-            }.decodeSingleOrNull<PlaylistDto>()
+            }
+            Log.d(TAG, "[DEBUG] Resposta bruta (playlists): ${response.data}")
+            val result = response.decodeSingleOrNull<PlaylistDto>()
             Log.d(TAG, "[EXIT] getPlaylistById - Result: $result")
             result
         } catch (e: Exception) {
-            Log.e(TAG, "[ERROR] getPlaylistById failed for ID: $id", e)
+            Log.e(TAG, "[ERROR] getPlaylistById failed for ID: $id com a seguinte exceção:", e)
             null
         }
     }
@@ -211,15 +230,17 @@ object SupabaseManager {
     suspend fun getPlaylistMidias(playlistId: String): List<PlaylistMidiaDto> {
         return try {
             Log.d(TAG, "[ENTRY] getPlaylistMidias - Playlist ID: $playlistId")
-            val result = supabaseClient.postgrest["playlist_midias"].select {
+            val response = supabaseClient.postgrest["playlist_midias"].select {
                 filter {
                     eq("playlist_id", playlistId)
                 }
-            }.decodeList<PlaylistMidiaDto>()
+            }
+            Log.d(TAG, "[DEBUG] Resposta bruta (playlist_midias): ${response.data}")
+            val result = response.decodeList<PlaylistMidiaDto>()
             Log.d(TAG, "[EXIT] getPlaylistMidias - Result size: ${result.size}")
             result
         } catch (e: Exception) {
-            Log.e(TAG, "[ERROR] getPlaylistMidias failed for Playlist ID: $playlistId", e)
+            Log.e(TAG, "[ERROR] getPlaylistMidias failed for Playlist ID: $playlistId com a seguinte exceção:", e)
             emptyList()
         }
     }
@@ -227,15 +248,17 @@ object SupabaseManager {
     suspend fun getMidiaById(id: String): MidiaDto? {
         return try {
             Log.d(TAG, "[ENTRY] getMidiaById - ID: $id")
-            val result = supabaseClient.postgrest["midias"].select {
+            val response = supabaseClient.postgrest["midias"].select {
                 filter {
                     eq("id", id)
                 }
-            }.decodeSingleOrNull<MidiaDto>()
+            }
+            Log.d(TAG, "[DEBUG] Resposta bruta (midias): ${response.data}")
+            val result = response.decodeSingleOrNull<MidiaDto>()
             Log.d(TAG, "[EXIT] getMidiaById - Result: $result")
             result
         } catch (e: Exception) {
-            Log.e(TAG, "[ERROR] getMidiaById failed for ID: $id", e)
+            Log.e(TAG, "[ERROR] getMidiaById failed for ID: $id com a seguinte exceção:", e)
             null
         }
     }
