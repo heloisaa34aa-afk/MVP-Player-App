@@ -1,0 +1,6 @@
+{
+  "name": "Vision Central Player",
+  "description": "Vision Central Player — Digital Signage Player",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
