@@ -5,7 +5,6 @@ plugins {
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.roborazzi)
-  alias(libs.plugins.secrets)
   alias(libs.plugins.kotlin.serialization)
   // alias(libs.plugins.google.services)
 }
@@ -46,8 +45,14 @@ android {
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("release")
+      buildConfigField("String", "SUPABASE_URL", "\"https://eefnfdwmidtnycesyapr.supabase.co\"")
+      buildConfigField("String", "SUPABASE_ANON_KEY", "\"sb_publishable_lCyfBoX5m8JzQ7mldxloQA_6YN3MTqg\"")
     }
-    debug { signingConfig = signingConfigs.getByName("debugConfig") }
+    debug {
+      signingConfig = signingConfigs.getByName("debugConfig")
+      buildConfigField("String", "SUPABASE_URL", "\"https://eefnfdwmidtnycesyapr.supabase.co\"")
+      buildConfigField("String", "SUPABASE_ANON_KEY", "\"sb_publishable_lCyfBoX5m8JzQ7mldxloQA_6YN3MTqg\"")
+    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
@@ -58,13 +63,6 @@ android {
     buildConfig = true
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
-}
-
-// Configure the Secrets Gradle Plugin to use .env and .env.example files
-// to match the convention used in Web projects.
-secrets {
-  propertiesFileName = ".env"
-  defaultPropertiesFileName = ".env.example"
 }
 
 // googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }

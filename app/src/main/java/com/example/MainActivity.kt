@@ -34,6 +34,9 @@ class MainActivity : ComponentActivity() {
         val repository = AppRepository(applicationContext)
         SyncScheduler.schedulePeriodicSync(applicationContext)
 
+        // Trigger environment variables validation logs immediately on startup
+        com.example.data.remote.SupabaseManager.isConfigValid
+
         // 4. Initialize ViewModel
         val viewModel = PlayerViewModel(repository)
 

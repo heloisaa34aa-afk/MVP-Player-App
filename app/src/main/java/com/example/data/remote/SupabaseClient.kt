@@ -94,11 +94,44 @@ data class TvStatusUpdate(
 object SupabaseManager {
     private const val TAG = "SupabaseManager"
 
+    var isConfigValid: Boolean = false
+        private set
+
+    init {
+        val url = try { BuildConfig.SUPABASE_URL } catch (e: Throwable) { "" }
+        val anonKey = try { BuildConfig.SUPABASE_ANON_KEY } catch (e: Throwable) { "" }
+
+        val urlOk = url.isNotBlank() && !url.contains("placeholder") && !url.contains("SEU-PROJETO")
+        val keyOk = anonKey.isNotBlank() && !anonKey.contains("placeholder") && !anonKey.contains("SUA_CHAVE_ANON")
+
+        if (!urlOk || !keyOk) {
+            if (!urlOk) {
+                Log.e(TAG, "ERRO: SUPABASE_URL não configurada.")
+            }
+            if (!keyOk) {
+                Log.e(TAG, "ERRO: SUPABASE_ANON_KEY não configurada.")
+            }
+            isConfigValid = false
+        } else {
+            Log.d(TAG, "✓ BuildConfig carregado")
+            Log.d(TAG, "✓ SUPABASE_URL encontrada")
+            Log.d(TAG, "✓ SUPABASE_ANON_KEY encontrada")
+            isConfigValid = true
+        }
+    }
+
     val supabaseClient: SupabaseClient by lazy {
+        if (!isConfigValid) {
+            val errorMsg = "Não é possível inicializar o cliente Supabase devido a configurações inválidas ou ausentes."
+            Log.e(TAG, errorMsg)
+            throw IllegalStateException(errorMsg)
+        }
+
         val url = BuildConfig.SUPABASE_URL
-        val key = BuildConfig.SUPABASE_KEY
-        Log.d(TAG, "Initializing Supabase with URL: $url")
-        createSupabaseClient(
+        val key = BuildConfig.SUPABASE_ANON_KEY
+        Log.d(TAG, "✓ Inicializando Supabase")
+        Log.d(TAG, "✓ Conectando...")
+        val client = createSupabaseClient(
             supabaseUrl = url,
             supabaseKey = key
         ) {
@@ -106,6 +139,8 @@ object SupabaseManager {
             install(Realtime)
             install(Storage)
         }
+        Log.d(TAG, "✓ Conexão realizada com sucesso")
+        client
     }
 
     suspend fun getTvByToken(token: String): TvDto? {
