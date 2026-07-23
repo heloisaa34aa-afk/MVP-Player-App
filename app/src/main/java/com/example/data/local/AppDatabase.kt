@@ -147,7 +147,8 @@ interface CacheDao {
         MidiaEntity::class,
         PlaylistMidiaEntity::class
     ],
-    version = 1,
+    // INCREMENTE A VERSÃO sempre que houver alteração nas Entities
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

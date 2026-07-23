@@ -50,7 +50,13 @@ class AppRepository(private val context: Context) {
             context.applicationContext,
             AppDatabase::class.java,
             "vision_central_cache.db"
-        ).fallbackToDestructiveMigration().build()
+        )
+        // Durante o desenvolvimento: fallbackToDestructiveMigration() é permitido 
+        // porque o Room é apenas cache e será recriado se o schema mudar.
+        // Quando o aplicativo entrar em produção: remover o fallback e 
+        // implementar Migrations reais para não perder o cache indevidamente, se aplicável.
+        .fallbackToDestructiveMigration()
+        .build()
     }
 
     val cacheDao: CacheDao by lazy { database.cacheDao() }
