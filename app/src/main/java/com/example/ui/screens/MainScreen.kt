@@ -135,6 +135,7 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
     private var realtimeJob: Job? = null
     private var loopTimerJob: Job? = null
     private var slideChangeJob: Job? = null
+    private var pairingPollJob: Job? = null
 
     // Slideshow local controls
     var currentSlideIndex by mutableIntStateOf(0)
@@ -173,7 +174,13 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
 
     // High performance poll/realtime listener before pairing completes
     private fun startUnpairedPolling(token: String) {
-        viewModelScope.launch {
+        if (pairingPollJob?.isActive == true) {
+            Log.d("PlayerViewModel", "Cancelando polling anterior...")
+            pairingPollJob?.cancel()
+        }
+        Log.d("PlayerViewModel", "Iniciando novo polling com o token: $token")
+        
+        pairingPollJob = viewModelScope.launch {
             while (_uiState.value is UiState.Unpaired) {
                 Log.d("PlayerViewModel", "Polling pairing status on Supabase for token: $token")
                 val success = repository.tryPairing(token)
@@ -328,9 +335,16 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
             val normalized = repository.normalizeToken(token)
             if (normalized.isEmpty()) return@launch
 
+            // Salva imediatamente o novo token
+            repository.saveDeviceToken(normalized)
+
             val state = _uiState.value
             if (state is UiState.Unpaired) {
-                _uiState.value = state.copy(isPairing = true, error = null)
+                _uiState.value = state.copy(deviceToken = normalized, isPairing = true, error = null)
+                
+                // Reinicia o polling com o novo token
+                startUnpairedPolling(normalized)
+
                 val success = repository.tryPairing(normalized)
                 if (success) {
                     val tvId = repository.tvIdFlow.firstOrNull()
@@ -339,6 +353,7 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
                     }
                 } else {
                     _uiState.value = state.copy(
+                        deviceToken = normalized,
                         isPairing = false,
                         error = "Token inválido ou não registrado no painel."
                     )
