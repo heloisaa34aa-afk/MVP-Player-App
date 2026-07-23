@@ -43,7 +43,8 @@ data class TvEntity(
     val texto_inferior_tamanho: String?,
     val texto_inferior_visivel: Boolean,
     val volume: Int?,
-    val tempo_transicao: Int?
+    val tempo_transicao: Int?,
+    val ultima_sincronizacao: String?
 )
 
 @Entity(tableName = "midias")

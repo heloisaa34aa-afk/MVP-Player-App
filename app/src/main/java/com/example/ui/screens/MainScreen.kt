@@ -117,6 +117,11 @@ import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.random.Random
+import com.example.data.repository.DeviceInfo
+import com.example.ui.components.HiddenMaintenancePanel
+import java.time.Instant
+
+import com.example.managers.DeviceUnlinkManager
 
 // --- View Models ---
 
@@ -133,8 +138,18 @@ sealed interface UiState {
 }
 
 class PlayerViewModel(val repository: AppRepository) : ViewModel() {
+    private val unlinkManager = DeviceUnlinkManager(repository)
+    
     private val _uiState = MutableStateFlow<UiState>(UiState.Checking)
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+
+    private val _deviceInfo = MutableStateFlow(
+        DeviceInfo(
+            tvName = "", token = "", clienteName = "", playlistName = "", playlistId = "", 
+            status = "Offline", lastSync = null, cacheSize = "0.0 MB", downloadedMediaCount = 0, appVersion = ""
+        )
+    )
+    val deviceInfo: StateFlow<DeviceInfo> = _deviceInfo.asStateFlow()
 
     private var activeSyncJob: Job? = null
     private var realtimeJob: Job? = null
@@ -253,6 +268,8 @@ class PlayerViewModel(val repository: AppRepository) : ViewModel() {
                 new.first.id != old.first.id || new.second.id != old.second.id || new.first.ordem != old.first.ordem
             }
 
+            _deviceInfo.value = repository.getDeviceInfo()
+
             _uiState.value = UiState.Paired(
                 tvId = tvId,
                 tv = tv,
@@ -306,6 +323,7 @@ class PlayerViewModel(val repository: AppRepository) : ViewModel() {
                 Log.d("PlayerViewModel", "Heartbeat tick. Updating online status.")
                 val online = repository.updateHeartbeat(tvId)
                 isOnline = online
+                _deviceInfo.value = repository.getDeviceInfo()
                 
                 if (online && repository.checkConfigurationChanges(tvId)) {
                     Log.d("PlayerViewModel", "Configuration changes detected during heartbeat. Triggering full sync.")
@@ -387,17 +405,15 @@ class PlayerViewModel(val repository: AppRepository) : ViewModel() {
     fun disconnectDevice() {
         viewModelScope.launch {
             val tvId = (_uiState.value as? UiState.Paired)?.tv?.id
-            if (tvId != null) {
-                repository.updateHeartbeat(tvId, "Offline")
-            }
             
             activeSyncJob?.cancel()
             realtimeJob?.cancel()
             loopTimerJob?.cancel()
             slideChangeJob?.cancel()
 
-            repository.clearAllData()
-            checkPairingStatus()
+            unlinkManager.unlinkDevice(tvId) {
+                checkPairingStatus()
+            }
         }
     }
 
@@ -1052,64 +1068,17 @@ fun PlayerScreen(
         }
 
         // Invisible management settings drawer trigger (Bottom-right hidden corner to disconnect/troubleshoot)
-        Box(
+        val deviceInfo by viewModel.deviceInfo.collectAsState()
+        HiddenMaintenancePanel(
+            deviceInfo = deviceInfo,
+            onDisconnect = onDisconnect,
+            onRefresh = onRefresh,
             modifier = Modifier
                 .size(64.dp)
                 .align(Alignment.BottomEnd)
                 .padding(bottom = 16.dp, end = 16.dp)
                 .testTag("hidden_admin_corner")
-        ) {
-            var showAdminMenu by remember { mutableStateOf(false) }
-            var clickCount by remember { mutableIntStateOf(0) }
-            var lastClickTime by remember { mutableStateOf(0L) }
-
-            Button(
-                onClick = { 
-                    val now = System.currentTimeMillis()
-                    if (now - lastClickTime > 2000) {
-                        clickCount = 1
-                    } else {
-                        clickCount++
-                    }
-                    lastClickTime = now
-                    if (clickCount >= 3) {
-                        showAdminMenu = true
-                        clickCount = 0
-                    }
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
-                modifier = Modifier.fillMaxSize()
-            ) {
-                // Opacity between 15% and 20%
-                Icon(
-                    imageVector = Icons.Default.DesktopMac, // Used as placeholder for Vision Central logo
-                    contentDescription = null,
-                    tint = Color.White.copy(alpha = 0.15f),
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-
-            if (showAdminMenu) {
-                AdminDialog(
-                    tvName = tv?.nome ?: "Desconhecido",
-                    token = tv?.token ?: "",
-                    clienteName = cliente?.nome ?: "N/A",
-                    playlistName = "Playlist Oculta", // Just placeholder, can't easily get playlist name without DB join
-                    status = if (isOnline) "Online" else "Offline",
-                    lastSync = tv?.uptime ?: "Recente", // Need to get last sync, fallback to uptime
-                    viewModel = viewModel,
-                    onDisconnect = {
-                        showAdminMenu = false
-                        onDisconnect()
-                    },
-                    onRefresh = {
-                        showAdminMenu = false
-                        onRefresh()
-                    },
-                    onDismiss = { showAdminMenu = false }
-                )
-            }
-        }
+        )
     }
 }
 
@@ -1360,18 +1329,34 @@ fun EmptyPlaylistPlaceholder(isSyncing: Boolean, onRefresh: () -> Unit) {
 
 @Composable
 fun AdminDialog(
-    tvName: String,
-    token: String,
-    clienteName: String,
-    playlistName: String,
-    status: String,
-    lastSync: String,
-    viewModel: PlayerViewModel,
+    deviceInfo: DeviceInfo,
     onDisconnect: () -> Unit,
     onRefresh: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var showDisconnectConfirmation by remember { mutableStateOf(false) }
+
+    fun formatRelativeTime(instant: Instant?): String {
+        if (instant == null) return ""
+        val now = Instant.now()
+        val seconds = java.time.Duration.between(instant, now).seconds
+        return when {
+            seconds < 10 -> "Agora"
+            seconds < 60 -> "há ${seconds} segundos"
+            seconds < 3600 -> {
+                val m = seconds / 60
+                if (m == 1L) "há 1 minuto" else "há $m minutos"
+            }
+            seconds < 86400 -> {
+                val h = seconds / 3600
+                if (h == 1L) "há 1 hora" else "há $h horas"
+            }
+            else -> {
+                val d = seconds / 86400
+                if (d == 1L) "há 1 dia" else "há $d dias"
+            }
+        }
+    }
 
     if (showDisconnectConfirmation) {
         androidx.compose.ui.window.Dialog(onDismissRequest = { showDisconnectConfirmation = false }) {
@@ -1468,15 +1453,15 @@ fun AdminDialog(
                 
                 // Details Grid
                 Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AdminDetailRow("Token vinculado:", token)
-                    AdminDetailRow("Nome da TV:", tvName)
-                    AdminDetailRow("Cliente:", clienteName)
-                    AdminDetailRow("Playlist:", playlistName)
-                    AdminDetailRow("Status:", status)
-                    AdminDetailRow("Última sincronização:", lastSync)
-                    AdminDetailRow("Versão do aplicativo:", BuildConfig.VERSION_NAME)
-                    AdminDetailRow("Uso de armazenamento local:", String.format("%.1f MB", viewModel.repository.getCacheSizeMB()))
-                    AdminDetailRow("Quantidade de mídias em cache:", "${viewModel.repository.getCachedMediaCount()}")
+                    AdminDetailRow("Token vinculado:", deviceInfo.token)
+                    AdminDetailRow("Nome da TV:", deviceInfo.tvName)
+                    AdminDetailRow("Cliente:", deviceInfo.clienteName)
+                    AdminDetailRow("Playlist:", deviceInfo.playlistName)
+                    AdminDetailRow("Status:", deviceInfo.status)
+                    AdminDetailRow("Última sincronização:", formatRelativeTime(deviceInfo.lastSync))
+                    AdminDetailRow("Versão do aplicativo:", deviceInfo.appVersion)
+                    AdminDetailRow("Uso de armazenamento local:", deviceInfo.cacheSize)
+                    AdminDetailRow("Quantidade de mídias em cache:", "${deviceInfo.downloadedMediaCount}")
                 }
                 
                 Spacer(modifier = Modifier.height(24.dp))

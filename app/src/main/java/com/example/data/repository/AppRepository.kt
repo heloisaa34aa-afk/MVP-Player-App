@@ -25,7 +25,22 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import java.time.Instant
 import java.time.OffsetDateTime
+import com.example.BuildConfig
+
+data class DeviceInfo(
+    val tvName: String,
+    val token: String,
+    val clienteName: String,
+    val playlistName: String,
+    val playlistId: String,
+    val status: String,
+    val lastSync: Instant?,
+    val cacheSize: String,
+    val downloadedMediaCount: Int,
+    val appVersion: String
+)
 
 val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "vision_settings")
 
@@ -152,7 +167,8 @@ class AppRepository(private val context: Context) {
                 texto_inferior_tamanho = remoteTv.texto_inferior_tamanho,
                 texto_inferior_visivel = remoteTv.texto_inferior_visivel,
                 volume = remoteTv.volume,
-                tempo_transicao = remoteTv.tempo_transicao
+                tempo_transicao = remoteTv.tempo_transicao,
+                ultima_sincronizacao = remoteTv.ultima_sincronizacao ?: OffsetDateTime.now().toString()
             )
             cacheDao.insertTv(tvEntity)
             Log.d(TAG, "TV saved to local DB.")
@@ -305,9 +321,19 @@ class AppRepository(private val context: Context) {
         return try {
             val lastSync = getLastSyncTime()
             SupabaseManager.updateTvStatus(tvId, status, getSystemUptime(), lastSync)
+            
+            val tv = cacheDao.getTv(tvId)
+            if (tv != null) {
+                cacheDao.insertTv(tv.copy(status = status, uptime = getSystemUptime()))
+            }
+            
             true
         } catch (e: Exception) {
             Log.e(TAG, "Heartbeat failed for status $status", e)
+            val tv = cacheDao.getTv(tvId)
+            if (tv != null) {
+                cacheDao.insertTv(tv.copy(status = "Offline", uptime = getSystemUptime()))
+            }
             false
         }
     }
@@ -319,6 +345,33 @@ class AppRepository(private val context: Context) {
         val hours = (uptimeMs / (1000 * 60 * 60)) % 24
         val days = uptimeMs / (1000 * 60 * 60 * 24)
         return "${days}d ${hours}h ${minutes}m ${seconds}s"
+    }
+
+    suspend fun getDeviceInfo(): DeviceInfo {
+        val tvId = tvIdFlow.firstOrNull()
+        val tv = tvId?.let { cacheDao.getTv(it) }
+        val cliente = tv?.cliente_id?.let { cacheDao.getCliente(it) }
+        val playlist = tv?.playlist_id?.let { cacheDao.getPlaylist(it) }
+
+        val lastSyncStr = tv?.ultima_sincronizacao
+        val lastSyncInstant = try {
+            if (lastSyncStr != null) OffsetDateTime.parse(lastSyncStr).toInstant() else null
+        } catch (e: Exception) {
+            null
+        }
+
+        return DeviceInfo(
+            tvName = tv?.nome ?: "",
+            token = tv?.token ?: "",
+            clienteName = cliente?.nome ?: "",
+            playlistName = playlist?.nome ?: "",
+            playlistId = playlist?.id ?: "",
+            status = tv?.status ?: "Offline",
+            lastSync = lastSyncInstant,
+            cacheSize = String.format("%.1f MB", getCacheSizeMB()),
+            downloadedMediaCount = getCachedMediaCount(),
+            appVersion = BuildConfig.VERSION_NAME
+        )
     }
 
     suspend fun checkConfigurationChanges(tvId: String): Boolean {
