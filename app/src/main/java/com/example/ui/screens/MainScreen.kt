@@ -132,7 +132,7 @@ sealed interface UiState {
         val tvId: String,
         val tv: TvEntity?,
         val cliente: ClienteEntity?,
-        val slides: List<Pair<PlaylistMidiaEntity, MidiaEntity>>,
+        val slides: List<com.example.domain.models.PlaybackItem>,
         val isSyncing: Boolean
     ) : UiState
 }
@@ -265,7 +265,7 @@ class PlayerViewModel(val repository: AppRepository) : ViewModel() {
             Log.d("PlayerViewModel", "Read from cache - TV: ${tv?.id}, Cliente: ${cliente?.id}, Slides count: ${slides.size}")
 
             val slidesChanged = slides.size != previousSlides.size || slides.zip(previousSlides).any { (new, old) ->
-                new.first.id != old.first.id || new.second.id != old.second.id || new.first.ordem != old.first.ordem
+                new.id != old.id || new.ordem != old.ordem
             }
 
             _deviceInfo.value = repository.getDeviceInfo()
@@ -290,6 +290,18 @@ class PlayerViewModel(val repository: AppRepository) : ViewModel() {
         }
     }
 
+    fun triggerConfigSync(tvId: String) {
+        viewModelScope.launch {
+            repository.syncTvConfig(tvId)
+            val tv = repository.cacheDao.getTv(tvId)
+            
+            val currentState = _uiState.value
+            if (currentState is UiState.Paired) {
+                _uiState.value = currentState.copy(tv = tv)
+            }
+        }
+    }
+
     private fun startRealtimeUpdates(tvId: String) {
         realtimeJob?.cancel()
         realtimeJob = viewModelScope.launch {
@@ -297,12 +309,24 @@ class PlayerViewModel(val repository: AppRepository) : ViewModel() {
                 Log.d("PlayerViewModel", "Realtime update trigger: $trigger")
                 if (trigger.startsWith("tv_updated:")) {
                     val recordJson = trigger.substringAfter("tv_updated:")
-                    val hasChanges = repository.hasTvContentChanges(tvId, recordJson)
-                    if (hasChanges) {
-                        Log.d("PlayerViewModel", "Content changes detected in TV remote update, syncing...")
+                    val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+                    val remoteTv = try { json.decodeFromString<com.example.data.remote.TvDto>(recordJson) } catch (e: Exception) { null }
+                    val localTv = repository.cacheDao.getTv(tvId)
+                    
+                    if (remoteTv != null && localTv != null && remoteTv.playlist_id != localTv.playlist_id) {
+                        Log.d("PlayerViewModel", "Playlist changed, triggering full sync...")
                         triggerFullSync(tvId)
+                    } else if (remoteTv != null && localTv != null && (remoteTv.rotacao != localTv.rotacao || remoteTv.volume != localTv.volume || remoteTv.texto_superior != localTv.texto_superior || remoteTv.texto_inferior != localTv.texto_inferior || remoteTv.tempo_transicao != localTv.tempo_transicao)) {
+                        Log.d("PlayerViewModel", "Config changed, syncing config only...")
+                        triggerConfigSync(tvId)
                     } else {
-                        Log.d("PlayerViewModel", "Heartbeat-only update received. Ignoring sync to prevent loop.")
+                        val hasChanges = repository.hasTvContentChanges(tvId, recordJson)
+                        if (hasChanges) {
+                            Log.d("PlayerViewModel", "Content changes detected in TV remote update, syncing...")
+                            triggerFullSync(tvId)
+                        } else {
+                            Log.d("PlayerViewModel", "Heartbeat-only update received. Ignoring sync to prevent loop.")
+                        }
                     }
                 } else if (trigger == "playlist_updated") {
                     Log.d("PlayerViewModel", "Playlist updated trigger, syncing...")
@@ -326,8 +350,15 @@ class PlayerViewModel(val repository: AppRepository) : ViewModel() {
                 _deviceInfo.value = repository.getDeviceInfo()
                 
                 if (online && repository.checkConfigurationChanges(tvId)) {
-                    Log.d("PlayerViewModel", "Configuration changes detected during heartbeat. Triggering full sync.")
-                    triggerFullSync(tvId)
+                    val remoteTv = SupabaseManager.getTvById(tvId)
+                    val localTv = repository.cacheDao.getTv(tvId)
+                    if (remoteTv != null && localTv != null && remoteTv.playlist_id != localTv.playlist_id) {
+                        Log.d("PlayerViewModel", "Playlist changes detected during heartbeat. Triggering full sync.")
+                        triggerFullSync(tvId)
+                    } else {
+                        Log.d("PlayerViewModel", "Configuration changes detected during heartbeat. Triggering config sync.")
+                        triggerConfigSync(tvId)
+                    }
                 }
             }
         }
@@ -344,7 +375,9 @@ class PlayerViewModel(val repository: AppRepository) : ViewModel() {
                 if (state is UiState.Paired && state.slides.isNotEmpty()) {
                     val currentItem = state.slides.getOrNull(currentSlideIndex)
                     if (currentItem != null) {
-                        val duration = currentItem.first.duracao ?: currentItem.second.duracao
+                        val duration = currentItem.duracao
+                        
+                        Log.d("PlayerViewModel", "[SYNC]\nReproduzindo índice: $currentSlideIndex\nNome: ${currentItem.nome}\nTipo: ${currentItem.tipo}\nURL: ${currentItem.url ?: currentItem.storage_path}")
                         
                         // Increment time elapsed every second
                         for (sec in 0 until duration) {
@@ -356,7 +389,7 @@ class PlayerViewModel(val repository: AppRepository) : ViewModel() {
                         if (state.slides.size > 1) {
                             currentSlideIndex = (currentSlideIndex + 1) % state.slides.size
                             currentSlideTimeElapsed = 0
-                            Log.d("PlayerViewModel", "Slideshow advanced to slide index: $currentSlideIndex")
+                            Log.d("PlayerViewModel", "[SYNC]\nMudando para índice: $currentSlideIndex")
                         } else {
                             currentSlideTimeElapsed = 0
                         }
@@ -887,7 +920,7 @@ fun PlayerScreen(
     tvId: String,
     tv: TvEntity?,
     cliente: ClienteEntity?,
-    slides: List<Pair<PlaylistMidiaEntity, MidiaEntity>>,
+    slides: List<com.example.domain.models.PlaybackItem>,
     currentSlideIndex: Int,
     isSyncing: Boolean,
     viewModel: PlayerViewModel,
@@ -944,25 +977,25 @@ fun PlayerScreen(
         }
     }
 
-    val currentMidia = slides.getOrNull(currentSlideIndex)?.second
+    val currentItem = slides.getOrNull(currentSlideIndex)
 
     // Handle Media changes and push to ExoPlayer/WebView
-    LaunchedEffect(currentMidia, isOnline) {
-        if (currentMidia == null) return@LaunchedEffect
+    LaunchedEffect(currentItem, isOnline) {
+        if (currentItem == null) return@LaunchedEffect
 
-        when (currentMidia.tipo) {
+        when (currentItem.tipo) {
             "video" -> {
                 webView.loadUrl("about:blank")
                 webView.onPause()
 
                 val videoUri = if (isOnline) {
-                    val url = currentMidia.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${currentMidia.url_storage}"
+                    val url = currentItem.url ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${currentItem.storage_path}"
                     Uri.parse(url)
                 } else {
-                    if (!currentMidia.local_file_path.isNullOrEmpty()) {
-                        Uri.fromFile(File(currentMidia.local_file_path!!))
+                    if (!currentItem.cache_path.isNullOrEmpty()) {
+                        Uri.fromFile(File(currentItem.cache_path!!))
                     } else {
-                        val url = currentMidia.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${currentMidia.url_storage}"
+                        val url = currentItem.url ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${currentItem.storage_path}"
                         Uri.parse(url)
                     }
                 }
@@ -985,8 +1018,8 @@ fun PlayerScreen(
 
                 if (isOnline) {
                     webView.onResume()
-                    val rawUrl = currentMidia.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${currentMidia.url_storage}" ?: "about:blank"
-                    val resolvedUrl = resolveEmbedUrl(rawUrl, currentMidia.tipo)
+                    val rawUrl = currentItem.url ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${currentItem.storage_path}" ?: "about:blank"
+                    val resolvedUrl = resolveEmbedUrl(rawUrl, currentItem.tipo)
                     webView.loadUrl(resolvedUrl)
                 } else {
                     webView.loadUrl("about:blank")
@@ -1014,10 +1047,10 @@ fun PlayerScreen(
                 // Base layer: WebView (only visible if web)
                 AndroidView(
                     factory = { webView },
-                    modifier = Modifier.fillMaxSize().alpha(if (currentMidia?.tipo != "image" && currentMidia?.tipo != "video" && isOnline) 1f else 0f)
+                    modifier = Modifier.fillMaxSize().alpha(if (currentItem?.tipo != "image" && currentItem?.tipo != "video" && isOnline) 1f else 0f)
                 )
 
-                if (currentMidia?.tipo != "image" && currentMidia?.tipo != "video" && !isOnline) {
+                if (currentItem?.tipo != "image" && currentItem?.tipo != "video" && !isOnline) {
                     Box(
                         modifier = Modifier.fillMaxSize().background(Color.Black),
                         contentAlignment = Alignment.Center
@@ -1052,12 +1085,12 @@ fun PlayerScreen(
                             )
                         }
                     },
-                    modifier = Modifier.fillMaxSize().alpha(if (currentMidia?.tipo == "video") 1f else 0f)
+                    modifier = Modifier.fillMaxSize().alpha(if (currentItem?.tipo == "video") 1f else 0f)
                 )
 
                 // Top layer: Image (with Crossfade for smooth image-to-image transitions)
-                if (currentMidia?.tipo == "image") {
-                    Crossfade(targetState = currentMidia, label = "ImageFade") { targetMidia ->
+                if (currentItem?.tipo == "image") {
+                    Crossfade(targetState = currentItem, label = "ImageFade") { targetMidia ->
                         ImageSlide(targetMidia, isOnline)
                     }
                 }
@@ -1085,15 +1118,15 @@ fun PlayerScreen(
 // --- Individual Slide Renderers ---
 
 @Composable
-fun ImageSlide(media: MidiaEntity, isOnline: Boolean) {
+fun ImageSlide(media: com.example.domain.models.PlaybackItem, isOnline: Boolean) {
     // Prefer absolute local file path if offline, otherwise prefer URL
     val imageSource = if (isOnline) {
-        media.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.url_storage}"
+        media.url ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.storage_path}"
     } else {
-        if (!media.local_file_path.isNullOrEmpty()) {
-            File(media.local_file_path!!)
+        if (!media.cache_path.isNullOrEmpty()) {
+            File(media.cache_path!!)
         } else {
-            media.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.url_storage}"
+            media.url ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.storage_path}"
         }
     }
 
@@ -1285,7 +1318,7 @@ fun EmptyPlaylistPlaceholder(isSyncing: Boolean, onRefresh: () -> Unit) {
             )
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = if (isSyncing) "Sincronizando conteúdo..." else "Sem Conteúdo Ativo",
+                text = if (isSyncing) "Sincronizando conteúdo..." else "Nenhuma mídia sincronizada (Verifique os logs de sincronização)",
                 color = Color.White,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.SemiBold

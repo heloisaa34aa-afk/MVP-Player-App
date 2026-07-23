@@ -38,9 +38,11 @@ class MediaDownloadManager(private val context: Context) {
 
         // If file already exists and is not empty, reuse it
         if (destinationFile.exists() && destinationFile.length() > 0) {
-            Log.d(TAG, "Media ${media.id} already exists locally: ${destinationFile.absolutePath}")
+            Log.d(TAG, "Arquivo encontrado em cache\nNome: ${media.nome}")
             return@withContext destinationFile.absolutePath
         }
+
+        Log.d(TAG, "Arquivo inexistente\nIniciando download\nNome: ${media.nome}")
 
         // Check usable space before downloading
         val usableSpace = mediaDir.usableSpace
@@ -49,7 +51,6 @@ class MediaDownloadManager(private val context: Context) {
             return@withContext null
         }
 
-        Log.d(TAG, "Starting download of ${media.id} from: $url")
         val request = Request.Builder().url(url).build()
 
         return@withContext try {
