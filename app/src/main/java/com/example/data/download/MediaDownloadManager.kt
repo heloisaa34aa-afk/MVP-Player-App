@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.example.BuildConfig
 import com.example.data.local.MidiaEntity
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -29,45 +31,45 @@ class MediaDownloadManager(private val context: Context) {
      * Downloads a media item and returns the local file path if successful.
      * Always plays/exhibits from the downloaded local file.
      */
-    suspend fun downloadMedia(media: MidiaEntity): String? {
-        val url = resolveMediaUrl(media) ?: return null
+    suspend fun downloadMedia(media: MidiaEntity): String? = withContext(Dispatchers.IO) {
+        val url = resolveMediaUrl(media) ?: return@withContext null
         val extension = getFileExtension(url, media.tipo)
         val destinationFile = File(mediaDir, "${media.id}$extension")
 
         // If file already exists and is not empty, reuse it
         if (destinationFile.exists() && destinationFile.length() > 0) {
             Log.d(TAG, "Media ${media.id} already exists locally: ${destinationFile.absolutePath}")
-            return destinationFile.absolutePath
+            return@withContext destinationFile.absolutePath
         }
 
         // Check usable space before downloading
         val usableSpace = mediaDir.usableSpace
         if (usableSpace < MIN_FREE_SPACE_BYTES) {
             Log.e(TAG, "Insufficient disk space for download. Free space: $usableSpace bytes. Required buffer: $MIN_FREE_SPACE_BYTES")
-            return null
+            return@withContext null
         }
 
         Log.d(TAG, "Starting download of ${media.id} from: $url")
         val request = Request.Builder().url(url).build()
 
-        return try {
+        return@withContext try {
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     Log.e(TAG, "Failed to download media ${media.id}: HTTP ${response.code}")
-                    return null
+                    return@withContext null
                 }
 
                 val body = response.body
                 if (body == null) {
                     Log.e(TAG, "Empty body response for media ${media.id}")
-                    return null
+                    return@withContext null
                 }
 
                 // Double check space if Content-Length is provided
                 val contentLength = body.contentLength()
                 if (contentLength > 0 && usableSpace < contentLength + MIN_FREE_SPACE_BYTES) {
                     Log.e(TAG, "Insufficient disk space for Content-Length $contentLength bytes.")
-                    return null
+                    return@withContext null
                 }
 
                 FileOutputStream(destinationFile).use { output ->

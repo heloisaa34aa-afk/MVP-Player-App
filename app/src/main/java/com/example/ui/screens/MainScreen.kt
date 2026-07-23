@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import androidx.compose.ui.draw.alpha
+import androidx.compose.material.icons.filled.Warning
 import android.annotation.SuppressLint
 import android.content.Context
 import android.net.Uri
@@ -863,6 +865,7 @@ fun PairingScreen(
 // --- Player Screen (Loop Slideshow & Overlays) ---
 
 @OptIn(UnstableApi::class)
+@SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun PlayerScreen(
     tvId: String,
@@ -878,6 +881,104 @@ fun PlayerScreen(
     // Apply Rotation based on tv.rotacao (0, 90, 180, 270)
     val rotationAngle = tv?.rotacao ?: 0
     val isOnline = viewModel.isOnline
+    val context = LocalContext.current
+
+    // Single ExoPlayer instance
+    val exoPlayer = remember {
+        ExoPlayer.Builder(context).build().apply {
+            repeatMode = Player.REPEAT_MODE_ONE
+        }
+    }
+
+    // Single WebView instance
+    val webView = remember {
+        WebView(context).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                databaseEnabled = true
+                loadsImagesAutomatically = true
+                mediaPlaybackRequiresUserGesture = false
+                mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                userAgentString = "Mozilla/5.0 (Linux; Android 10; TV Box) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36"
+            }
+            webViewClient = object : WebViewClient() {
+                override fun onReceivedError(
+                    view: WebView?,
+                    errorCode: Int,
+                    description: String?,
+                    failingUrl: String?
+                ) {
+                    super.onReceivedError(view, errorCode, description, failingUrl)
+                    Log.e("WebView", "WebView loading error: $description")
+                }
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            exoPlayer.stop()
+            exoPlayer.release()
+            webView.destroy()
+        }
+    }
+
+    val currentMidia = slides.getOrNull(currentSlideIndex)?.second
+
+    // Handle Media changes and push to ExoPlayer/WebView
+    LaunchedEffect(currentMidia, isOnline) {
+        if (currentMidia == null) return@LaunchedEffect
+
+        when (currentMidia.tipo) {
+            "video" -> {
+                webView.loadUrl("about:blank")
+                webView.onPause()
+
+                val videoUri = if (isOnline) {
+                    val url = currentMidia.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${currentMidia.url_storage}"
+                    Uri.parse(url)
+                } else {
+                    if (!currentMidia.local_file_path.isNullOrEmpty()) {
+                        Uri.fromFile(File(currentMidia.local_file_path!!))
+                    } else {
+                        val url = currentMidia.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${currentMidia.url_storage}"
+                        Uri.parse(url)
+                    }
+                }
+
+                val mediaItem = MediaItem.fromUri(videoUri)
+                exoPlayer.setMediaItem(mediaItem)
+                exoPlayer.setVolume((tv?.volume ?: 100).toFloat() / 100f)
+                exoPlayer.prepare()
+                exoPlayer.playWhenReady = true
+            }
+            "image" -> {
+                exoPlayer.stop()
+                exoPlayer.clearMediaItems()
+                webView.loadUrl("about:blank")
+                webView.onPause()
+            }
+            else -> { // web
+                exoPlayer.stop()
+                exoPlayer.clearMediaItems()
+
+                if (isOnline) {
+                    webView.onResume()
+                    val rawUrl = currentMidia.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${currentMidia.url_storage}" ?: "about:blank"
+                    val resolvedUrl = resolveEmbedUrl(rawUrl, currentMidia.tipo)
+                    webView.loadUrl(resolvedUrl)
+                } else {
+                    webView.loadUrl("about:blank")
+                    webView.onPause()
+                }
+            }
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -894,16 +995,54 @@ fun PlayerScreen(
                 // Beautiful placeholder empty state
                 EmptyPlaylistPlaceholder(isSyncing, onRefresh)
             } else {
-                val currentSlide = slides.getOrNull(currentSlideIndex)
-                if (currentSlide != null) {
-                    // Slide Renderer
-                    Crossfade(targetState = currentSlide, label = "SlideCrossfade") { slide ->
-                        val midia = slide.second
-                        when (midia.tipo) {
-                            "image" -> ImageSlide(media = midia, isOnline = isOnline)
-                            "video" -> VideoSlide(media = midia, volume = tv?.volume ?: 100, isOnline = isOnline)
-                            else -> WebSlide(media = midia, isOnline = isOnline) // website, instagram, youtube, google_maps, canva
+                // Base layer: WebView (only visible if web)
+                AndroidView(
+                    factory = { webView },
+                    modifier = Modifier.fillMaxSize().alpha(if (currentMidia?.tipo != "image" && currentMidia?.tipo != "video" && isOnline) 1f else 0f)
+                )
+
+                if (currentMidia?.tipo != "image" && currentMidia?.tipo != "video" && !isOnline) {
+                    Box(
+                        modifier = Modifier.fillMaxSize().background(Color.Black),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Default.SignalCellularConnectedNoInternet0Bar,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(64.dp)
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "Conteúdo indisponível offline",
+                                color = Color.White,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
+                    }
+                }
+
+                // Middle layer: ExoPlayer (only visible if video)
+                AndroidView(
+                    factory = { ctx ->
+                        PlayerView(ctx).apply {
+                            player = exoPlayer
+                            useController = false
+                            layoutParams = FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize().alpha(if (currentMidia?.tipo == "video") 1f else 0f)
+                )
+
+                // Top layer: Image (with Crossfade for smooth image-to-image transitions)
+                if (currentMidia?.tipo == "image") {
+                    Crossfade(targetState = currentMidia, label = "ImageFade") { targetMidia ->
+                        ImageSlide(targetMidia, isOnline)
                     }
                 }
             }
@@ -1000,214 +1139,6 @@ fun ImageSlide(media: MidiaEntity, isOnline: Boolean) {
             contentDescription = media.nome,
             modifier = Modifier.fillMaxSize()
         )
-    }
-}
-
-@OptIn(UnstableApi::class)
-@Composable
-fun VideoSlide(media: MidiaEntity, volume: Int, isOnline: Boolean) {
-    val context = LocalContext.current
-    
-    val videoUri = remember(media, isOnline) {
-        if (isOnline) {
-            val url = media.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.url_storage}"
-            Uri.parse(url)
-        } else {
-            if (!media.local_file_path.isNullOrEmpty()) {
-                Uri.fromFile(File(media.local_file_path!!))
-            } else {
-                val url = media.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.url_storage}"
-                Uri.parse(url)
-            }
-        }
-    }
-
-    val exoPlayer = remember(media, isOnline) {
-        ExoPlayer.Builder(context).build().apply {
-            val mediaItem = MediaItem.fromUri(videoUri)
-            setMediaItem(mediaItem)
-            repeatMode = Player.REPEAT_MODE_ONE
-            setVolume(volume.toFloat() / 100f)
-            prepare()
-            playWhenReady = true
-        }
-    }
-
-    DisposableEffect(exoPlayer) {
-        onDispose {
-            exoPlayer.stop()
-            exoPlayer.release()
-        }
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black),
-        contentAlignment = Alignment.Center
-    ) {
-        AndroidView(
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = exoPlayer
-                    useController = false
-                    layoutParams = FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                }
-            },
-            modifier = Modifier.fillMaxSize()
-        )
-    }
-}
-
-@SuppressLint("SetJavaScriptEnabled")
-@Composable
-fun WebSlide(media: MidiaEntity, isOnline: Boolean) {
-    val rawUrl = media.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.url_storage}" ?: "about:blank"
-    
-    // Auto convert standard YouTube links to full-screen embeds to prevent clicking "Play"
-    val resolvedUrl = remember(rawUrl) {
-        resolveEmbedUrl(rawUrl, media.tipo)
-    }
-
-    if (!isOnline) {
-        Box(
-            modifier = Modifier.fillMaxSize().background(Color.Black),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(
-                    imageVector = Icons.Default.SignalCellularConnectedNoInternet0Bar,
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.size(64.dp)
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "Conteúdo indisponível offline",
-                    color = Color.White,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-        return
-    }
-
-    var isLoading by remember { mutableStateOf(true) }
-    var hasError by remember { mutableStateOf(false) }
-
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        AndroidView(
-            factory = { ctx ->
-                WebView(ctx).apply {
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                    
-                    // Hardware acceleration and safe configurations to prevent leaks
-                    settings.apply {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        databaseEnabled = true
-                        loadsImagesAutomatically = true
-                        mediaPlaybackRequiresUserGesture = false
-                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                        userAgentString = "Mozilla/5.0 (Linux; Android 10; TV Box) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36"
-                    }
-
-                    webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            super.onPageFinished(view, url)
-                            isLoading = false
-                        }
-
-                        override fun onReceivedError(
-                            view: WebView?,
-                            errorCode: Int,
-                            description: String?,
-                            failingUrl: String?
-                        ) {
-                            super.onReceivedError(view, errorCode, description, failingUrl)
-                            Log.e("WebSlide", "WebView loading error: $description")
-                            hasError = true
-                            isLoading = false
-                        }
-                    }
-
-                    loadUrl(resolvedUrl)
-                }
-            },
-            modifier = Modifier.fillMaxSize(),
-            onRelease = { webView ->
-                // Ensure correct resource cleaning to prevent 24/7 signage memory leaks
-                try {
-                    webView.stopLoading()
-                    webView.clearHistory()
-                    webView.removeAllViews()
-                    webView.destroy()
-                    Log.d("WebSlide", "WebView cleanly destroyed.")
-                } catch (e: Exception) {
-                    Log.e("WebSlide", "Error destroying WebView", e)
-                }
-            }
-        )
-
-        // Loading Overlay
-        if (isLoading) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xE60F172A)),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(color = Color(0xFF3B82F6))
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text("Carregando conteúdo...", color = Color.White, fontSize = 14.sp)
-                }
-            }
-        }
-
-        // Error State
-        if (hasError) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xFF1E293B)),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.padding(24.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.SignalCellularConnectedNoInternet0Bar,
-                        contentDescription = "No Connection",
-                        tint = Color(0xFFEF4444),
-                        modifier = Modifier.size(48.dp)
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "Não foi possível carregar a mídia online.",
-                        color = Color.White,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        textAlign = TextAlign.Center
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Verifique a sua conexão com a Internet.",
-                        color = Color(0xFF94A3B8),
-                        fontSize = 13.sp,
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
-        }
     }
 }
 
@@ -1440,6 +1371,74 @@ fun AdminDialog(
     onRefresh: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    var showDisconnectConfirmation by remember { mutableStateOf(false) }
+
+    if (showDisconnectConfirmation) {
+        androidx.compose.ui.window.Dialog(onDismissRequest = { showDisconnectConfirmation = false }) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .width(400.dp)
+                    .padding(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "Warning",
+                        tint = Color(0xFFEF4444),
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "Deseja realmente desvincular esta TV?",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Todos os arquivos em cache serão removidos e será necessário informar um novo token para ativar novamente.",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 14.sp,
+                        textAlign = TextAlign.Center,
+                        lineHeight = 20.sp
+                    )
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Button(
+                            onClick = { showDisconnectConfirmation = false },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155)),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Cancelar", color = Color.White)
+                        }
+                        Button(
+                            onClick = {
+                                showDisconnectConfirmation = false
+                                onDisconnect()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Desvincular", color = Color.White)
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
+
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
@@ -1502,7 +1501,7 @@ fun AdminDialog(
                     }
                     
                     Button(
-                        onClick = onDisconnect,
+                        onClick = { showDisconnectConfirmation = true },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.fillMaxWidth()
