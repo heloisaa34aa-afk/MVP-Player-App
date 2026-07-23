@@ -216,6 +216,7 @@ object SupabaseManager {
             // Listen to updates on this specific TV
             val tvChanges = channel.postgresChangeFlow<PostgresAction>(schema = "public") {
                 table = "tvs"
+                filter = "id=eq.$tvId"
             }
             
             // Listen to changes in playlist mappings
@@ -232,7 +233,7 @@ object SupabaseManager {
                         val recordId = record["id"]?.toString()?.removeSurrounding("\"")
                         if (recordId == tvId) {
                             Log.d(TAG, "Realtime TV update detected for $tvId")
-                            send("tv_updated")
+                            send("tv_updated:" + record.toString())
                         }
                     }
                 }

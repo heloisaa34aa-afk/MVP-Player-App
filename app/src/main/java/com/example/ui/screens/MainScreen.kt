@@ -212,6 +212,8 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
         activeSyncJob?.cancel()
         activeSyncJob = viewModelScope.launch {
             val currentState = _uiState.value
+            val previousSlides = (currentState as? UiState.Paired)?.slides ?: emptyList()
+
             if (currentState is UiState.Paired) {
                 _uiState.value = currentState.copy(isSyncing = true)
             }
@@ -225,6 +227,10 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
             val cliente = tv?.cliente_id?.let { repository.cacheDao.getCliente(it) }
             val slides = repository.getPlaylistMediasFromCache(tvId)
 
+            val slidesChanged = slides.size != previousSlides.size || slides.zip(previousSlides).any { (new, old) ->
+                new.first.id != old.first.id || new.second.id != old.second.id || new.first.ordem != old.first.ordem
+            }
+
             _uiState.value = UiState.Paired(
                 tvId = tvId,
                 tv = tv,
@@ -233,8 +239,13 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
                 isSyncing = false
             )
 
-            // Start or adjust the slideshow loop
-            startSlideshowLoop()
+            // Start or adjust the slideshow loop only if playlist changed or not running
+            if (slidesChanged || slideChangeJob == null || slideChangeJob?.isActive == false) {
+                Log.d("PlayerViewModel", "Slides list changed or slideshow was not active. Starting slideshow loop.")
+                startSlideshowLoop()
+            } else {
+                Log.d("PlayerViewModel", "Slides list did not change. Continuing slideshow loop at current index $currentSlideIndex.")
+            }
         }
     }
 
@@ -243,7 +254,21 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
         realtimeJob = viewModelScope.launch {
             SupabaseManager.observeRealtimeChanges(tvId).collectLatest { trigger ->
                 Log.d("PlayerViewModel", "Realtime update trigger: $trigger")
-                triggerFullSync(tvId)
+                if (trigger.startsWith("tv_updated:")) {
+                    val recordJson = trigger.substringAfter("tv_updated:")
+                    val hasChanges = repository.hasTvContentChanges(tvId, recordJson)
+                    if (hasChanges) {
+                        Log.d("PlayerViewModel", "Content changes detected in TV remote update, syncing...")
+                        triggerFullSync(tvId)
+                    } else {
+                        Log.d("PlayerViewModel", "Heartbeat-only update received. Ignoring sync to prevent loop.")
+                    }
+                } else if (trigger == "playlist_updated") {
+                    Log.d("PlayerViewModel", "Playlist updated trigger, syncing...")
+                    triggerFullSync(tvId)
+                } else {
+                    triggerFullSync(tvId)
+                }
             }
         }
     }
@@ -479,7 +504,7 @@ fun PairingScreen(
     errorMsg: String?,
     onSubmitToken: (String) -> Unit
 ) {
-    var manualTokenInput by remember { mutableStateOf("") }
+    var tokenInput by remember(deviceToken) { mutableStateOf(deviceToken) }
     val cacheSize = rememberCacheSize()
     val freeSpace = rememberFreeSpace()
 
@@ -564,10 +589,10 @@ fun PairingScreen(
             )
             Spacer(modifier = Modifier.height(32.dp))
 
-            // Token Display Card
+            // Unified Token Card
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF2B2930)),
-                shape = RoundedCornerShape(32.dp),
+                shape = RoundedCornerShape(24.dp),
                 border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF49454F)),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -575,70 +600,75 @@ fun PairingScreen(
                     .testTag("pairing_instructions_card")
             ) {
                 Column(
-                    modifier = Modifier.padding(32.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                    modifier = Modifier.padding(28.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(20.dp)
                 ) {
-                    // Split the token to match mockup style (VC-4821-XT)
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center,
-                        modifier = Modifier.fillMaxWidth().testTag("device_token_display")
+                    Text(
+                        text = "Token de Ativação",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.align(Alignment.Start)
+                    )
+
+                    OutlinedTextField(
+                        value = tokenInput,
+                        onValueChange = { tokenInput = it.uppercase() },
+                        label = { Text("Token de Pareamento") },
+                        placeholder = { Text("ex: VC-1234-AB") },
+                        singleLine = true,
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            textAlign = TextAlign.Center
+                        ),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color(0xFFD0BCFF),
+                            unfocusedTextColor = Color(0xFFD0BCFF),
+                            focusedBorderColor = Color(0xFFD0BCFF),
+                            unfocusedBorderColor = Color(0xFF49454F),
+                            focusedLabelColor = Color(0xFFD0BCFF),
+                            unfocusedLabelColor = Color(0xFFCAC4D0),
+                            focusedContainerColor = Color(0xFF1C1B1F),
+                            unfocusedContainerColor = Color(0xFF1C1B1F)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("manual_token_input"),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { onSubmitToken(tokenInput) }),
+                        shape = RoundedCornerShape(100.dp) // sleek pill shape
+                    )
+
+                    Button(
+                        onClick = { onSubmitToken(tokenInput) },
+                        enabled = !isPairing && tokenInput.isNotBlank(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFEADDFF),
+                            contentColor = Color(0xFF21005D),
+                            disabledContainerColor = Color(0xFF49454F),
+                            disabledContentColor = Color(0xFFCAC4D0)
+                        ),
+                        shape = RoundedCornerShape(100.dp), // pill-shaped button
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(56.dp)
+                            .testTag("submit_token_button")
                     ) {
-                        val tokenParts = deviceToken.split("-")
-                        if (tokenParts.size >= 3) {
-                            Text(
-                                text = tokenParts[0],
-                                color = Color(0xFFD0BCFF),
-                                fontSize = 42.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
-                            )
-                            Text(
-                                text = "-",
-                                color = Color(0xFFE6E1E5),
-                                fontSize = 42.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
-                            )
-                            Text(
-                                text = tokenParts[1],
-                                color = Color(0xFFD0BCFF),
-                                fontSize = 42.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
-                            )
-                            Text(
-                                text = "-",
-                                color = Color(0xFFE6E1E5),
-                                fontSize = 42.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
-                            )
-                            Text(
-                                text = tokenParts[2],
-                                color = Color(0xFFD0BCFF),
-                                fontSize = 42.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
-                            )
+                        if (isPairing) {
+                            CircularProgressIndicator(color = Color(0xFF21005D), modifier = Modifier.size(24.dp))
                         } else {
-                            // Fallback to full device token
-                            Text(
-                                text = deviceToken,
-                                color = Color(0xFFD0BCFF),
-                                fontSize = 42.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
-                            )
+                            Text("Conectar", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
-
-                    Spacer(modifier = Modifier.height(24.dp))
 
                     // Progress indicators and status info
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
+                        horizontalArrangement = Arrangement.Center,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         CircularProgressIndicator(
                             color = Color(0xFFD0BCFF),
@@ -652,80 +682,17 @@ fun PairingScreen(
                             fontSize = 13.sp
                         )
                     }
-                }
-            }
 
-            Spacer(modifier = Modifier.height(32.dp))
-
-            // Manual token input row
-            Text(
-                text = "Ou insira o token gerado pelo painel manualmente:",
-                color = Color(0xFF938F99),
-                fontSize = 14.sp,
-                modifier = Modifier.padding(bottom = 12.dp)
-            )
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .widthIn(max = 500.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
-                OutlinedTextField(
-                    value = manualTokenInput,
-                    onValueChange = { manualTokenInput = it },
-                    label = { Text("Token (ex: VC-1234-AB)") },
-                    placeholder = { Text("VC-1234-AB") },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White,
-                        focusedBorderColor = Color(0xFFD0BCFF),
-                        unfocusedBorderColor = Color(0xFF49454F),
-                        focusedLabelColor = Color(0xFFD0BCFF),
-                        unfocusedLabelColor = Color(0xFFCAC4D0),
-                        focusedContainerColor = Color(0xFF2B2930),
-                        unfocusedContainerColor = Color(0xFF2B2930)
-                    ),
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("manual_token_input"),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { onSubmitToken(manualTokenInput) }),
-                    shape = RoundedCornerShape(100.dp) // pill-shaped text field
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Button(
-                    onClick = { onSubmitToken(manualTokenInput) },
-                    enabled = !isPairing && manualTokenInput.isNotBlank(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFFEADDFF),
-                        contentColor = Color(0xFF21005D),
-                        disabledContainerColor = Color(0xFF49454F),
-                        disabledContentColor = Color(0xFFCAC4D0)
-                    ),
-                    shape = RoundedCornerShape(100.dp), // pill-shaped button
-                    modifier = Modifier
-                        .height(56.dp)
-                        .testTag("submit_token_button")
-                ) {
-                    if (isPairing) {
-                        CircularProgressIndicator(color = Color(0xFF21005D), modifier = Modifier.size(24.dp))
-                    } else {
-                        Text("Conectar", fontWeight = FontWeight.SemiBold)
+                    if (errorMsg != null) {
+                        Text(
+                            text = errorMsg,
+                            color = Color(0xFFEF4444),
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
                 }
-            }
-
-            if (errorMsg != null) {
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = errorMsg,
-                    color = Color(0xFFEF4444),
-                    fontSize = 13.sp,
-                    textAlign = TextAlign.Center
-                )
             }
 
             Spacer(modifier = Modifier.height(32.dp))

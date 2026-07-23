@@ -18,6 +18,8 @@ import com.example.data.local.PlaylistEntity
 import com.example.data.local.PlaylistMidiaEntity
 import com.example.data.local.TvEntity
 import com.example.data.remote.SupabaseManager
+import com.example.data.remote.TvDto
+import kotlinx.serialization.json.Json
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.map
@@ -260,5 +262,40 @@ class AppRepository(private val context: Context) {
         val hours = (uptimeMs / (1000 * 60 * 60)) % 24
         val days = uptimeMs / (1000 * 60 * 60 * 24)
         return "${days}d ${hours}h ${minutes}m ${seconds}s"
+    }
+
+    suspend fun hasTvContentChanges(tvId: String, recordJson: String): Boolean {
+        return try {
+            val localTv = cacheDao.getTv(tvId) ?: return true
+            
+            val json = Json { ignoreUnknownKeys = true }
+            val remoteTv = json.decodeFromString<TvDto>(recordJson)
+            
+            val playlistChanged = remoteTv.playlist_id != localTv.playlist_id
+            val nameChanged = remoteTv.nome != localTv.nome
+            val rotationChanged = remoteTv.rotacao != localTv.rotacao
+            val textSupChanged = remoteTv.texto_superior != localTv.texto_superior ||
+                    remoteTv.texto_superior_cor != localTv.texto_superior_cor ||
+                    remoteTv.texto_superior_tamanho != localTv.texto_superior_tamanho ||
+                    remoteTv.texto_superior_visivel != localTv.texto_superior_visivel
+            val textInfChanged = remoteTv.texto_inferior != localTv.texto_inferior ||
+                    remoteTv.texto_inferior_cor != localTv.texto_inferior_cor ||
+                    remoteTv.texto_inferior_tamanho != localTv.texto_inferior_tamanho ||
+                    remoteTv.texto_inferior_visivel != localTv.texto_inferior_visivel
+            val volumeChanged = remoteTv.volume != localTv.volume
+            val transitionChanged = remoteTv.tempo_transicao != localTv.tempo_transicao
+
+            val hasChanges = playlistChanged || nameChanged || rotationChanged || textSupChanged || textInfChanged || volumeChanged || transitionChanged
+            
+            Log.d(TAG, "Comparing TV content fields. " +
+                    "playlistChanged: $playlistChanged, nameChanged: $nameChanged, rotationChanged: $rotationChanged, " +
+                    "textSup: $textSupChanged, textInf: $textInfChanged, volume: $volumeChanged, transition: $transitionChanged. " +
+                    "Result: $hasChanges")
+            
+            hasChanges
+        } catch (e: Exception) {
+            Log.e(TAG, "Error comparing TV content changes, defaulting to true", e)
+            true
+        }
     }
 }
