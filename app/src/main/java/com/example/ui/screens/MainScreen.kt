@@ -197,6 +197,7 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
     }
 
     private fun loadPairedState(tvId: String) {
+        Log.d("PlayerViewModel", "[ENTRY] loadPairedState - Transitioning to Paired screen for TV ID: $tvId")
         // Cancel previous sync or realtime observations
         activeSyncJob?.cancel()
         realtimeJob?.cancel()
@@ -210,12 +211,15 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
         )
 
         // Start periodic sync and realtime listener
+        Log.d("PlayerViewModel", "Starting realtime updates and full sync...")
         startRealtimeUpdates(tvId)
         triggerFullSync(tvId)
         startHeartbeatLoop(tvId)
+        Log.d("PlayerViewModel", "[EXIT] loadPairedState - Complete")
     }
 
     fun triggerFullSync(tvId: String) {
+        Log.d("PlayerViewModel", "[ENTRY] triggerFullSync - TV ID: $tvId")
         activeSyncJob?.cancel()
         activeSyncJob = viewModelScope.launch {
             val currentState = _uiState.value
@@ -226,6 +230,7 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
             }
 
             // Sync from Supabase to Room
+            Log.d("PlayerViewModel", "Calling repository.syncData...")
             val success = repository.syncData(tvId)
             Log.d("PlayerViewModel", "Sync data result: $success")
 
@@ -233,6 +238,7 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
             val tv = repository.cacheDao.getTv(tvId)
             val cliente = tv?.cliente_id?.let { repository.cacheDao.getCliente(it) }
             val slides = repository.getPlaylistMediasFromCache(tvId)
+            Log.d("PlayerViewModel", "Read from cache - TV: ${tv?.id}, Cliente: ${cliente?.id}, Slides count: ${slides.size}")
 
             val slidesChanged = slides.size != previousSlides.size || slides.zip(previousSlides).any { (new, old) ->
                 new.first.id != old.first.id || new.second.id != old.second.id || new.first.ordem != old.first.ordem
@@ -245,6 +251,7 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
                 slides = slides,
                 isSyncing = false
             )
+            Log.d("PlayerViewModel", "Updated UI state to Paired with ${slides.size} slides.")
 
             // Start or adjust the slideshow loop only if playlist changed or not running
             if (slidesChanged || slideChangeJob == null || slideChangeJob?.isActive == false) {
@@ -253,6 +260,7 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
             } else {
                 Log.d("PlayerViewModel", "Slides list did not change. Continuing slideshow loop at current index $currentSlideIndex.")
             }
+            Log.d("PlayerViewModel", "[EXIT] triggerFullSync")
         }
     }
 

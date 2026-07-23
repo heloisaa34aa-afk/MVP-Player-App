@@ -88,31 +88,35 @@ class AppRepository(private val context: Context) {
      */
     suspend fun tryPairing(token: String): Boolean {
         val normalized = normalizeToken(token)
-        Log.d(TAG, "Trying to pair token: $token (normalized: $normalized)")
+        Log.d(TAG, "[ENTRY] tryPairing - token: $token (normalized: $normalized)")
         val remoteTv = SupabaseManager.getTvByToken(normalized)
         if (remoteTv != null) {
             saveTvId(remoteTv.id)
             saveDeviceToken(normalized)
-            Log.d(TAG, "Successfully paired with TV ID: ${remoteTv.id}")
+            Log.d(TAG, "[EXIT] tryPairing - Successfully paired with TV ID: ${remoteTv.id}")
             
             // Perform immediate sync
-            syncData(remoteTv.id)
+            val syncSuccess = syncData(remoteTv.id)
+            Log.d(TAG, "Sync result after pairing: $syncSuccess")
             return true
         }
+        Log.d(TAG, "[EXIT] tryPairing - TV not found for token")
         return false
     }
 
     // --- Sync logic ---
 
     suspend fun syncData(tvId: String): Boolean {
-        Log.d(TAG, "Starting sync for TV: $tvId")
+        Log.d(TAG, "[ENTRY] syncData - Starting sync for TV: $tvId")
         return try {
             // 1. Fetch TV from remote
             val remoteTv = SupabaseManager.getTvById(tvId)
             if (remoteTv == null) {
-                Log.w(TAG, "Could not find TV $tvId on remote. Sync fallback to local.")
+                Log.w(TAG, "[EXIT] syncData - Could not find TV $tvId on remote. Sync fallback to local.")
                 return false
             }
+
+            Log.d(TAG, "TV fetched successfully. Status: ${remoteTv.status}, Playlist: ${remoteTv.playlist_id}")
 
             // Save to Local DB
             val tvEntity = TvEntity(
@@ -136,11 +140,13 @@ class AppRepository(private val context: Context) {
                 tempo_transicao = remoteTv.tempo_transicao
             )
             cacheDao.insertTv(tvEntity)
+            Log.d(TAG, "TV saved to local DB.")
 
             // 2. Resolve Cliente
             val clienteId = remoteTv.cliente_id
             var remoteCliente: com.example.data.remote.ClienteDto? = null
             if (clienteId != null) {
+                Log.d(TAG, "Fetching cliente for ID: $clienteId")
                 remoteCliente = SupabaseManager.getClienteById(clienteId)
                 if (remoteCliente != null) {
                     val clienteEntity = ClienteEntity(
@@ -150,19 +156,27 @@ class AppRepository(private val context: Context) {
                         ticker_text = remoteCliente.ticker_text
                     )
                     cacheDao.insertCliente(clienteEntity)
+                    Log.d(TAG, "Cliente saved to local DB.")
                 }
+            } else {
+                Log.d(TAG, "No cliente_id associated with TV.")
             }
 
             // 3. Resolve Playlist ID (via TV or Cliente)
             val playlistId = remoteTv.playlist_id ?: remoteCliente?.playlist_id
             if (playlistId != null) {
+                Log.d(TAG, "Fetching playlist for ID: $playlistId")
                 // Fetch and cache Playlist
                 val remotePlaylist = SupabaseManager.getPlaylistById(playlistId)
                 if (remotePlaylist != null) {
                     cacheDao.insertPlaylist(PlaylistEntity(id = remotePlaylist.id, nome = remotePlaylist.nome))
+                    Log.d(TAG, "Playlist saved to local DB.")
+                } else {
+                    Log.w(TAG, "Playlist $playlistId not found.")
                 }
 
                 // Fetch Playlist Midias
+                Log.d(TAG, "Fetching playlist medias for playlist ID: $playlistId")
                 val remotePlaylistMidias = SupabaseManager.getPlaylistMidias(playlistId)
                 Log.d(TAG, "Found ${remotePlaylistMidias.size} playlist medias on remote.")
 
@@ -183,6 +197,7 @@ class AppRepository(private val context: Context) {
                 val activeMediaIds = mutableSetOf<String>()
                 val mediaEntities = mutableListOf<MidiaEntity>()
 
+                Log.d(TAG, "Fetching individual media details and downloading if necessary...")
                 for (pm in remotePlaylistMidias) {
                     activeMediaIds.add(pm.midia_id)
                     val remoteMedia = SupabaseManager.getMidiaById(pm.midia_id)
@@ -199,28 +214,40 @@ class AppRepository(private val context: Context) {
 
                         // If media source is storage, download and save locally
                         if (remoteMedia.origem == "storage" && (remoteMedia.tipo == "image" || remoteMedia.tipo == "video")) {
+                            Log.d(TAG, "[ENTRY] Downloading media ${remoteMedia.id}...")
                             val localPath = downloadManager.downloadMedia(mediaEntity)
                             if (localPath != null) {
+                                Log.d(TAG, "[EXIT] Downloaded media ${remoteMedia.id} to $localPath")
                                 mediaEntity.local_file_path = localPath
+                            } else {
+                                Log.w(TAG, "[EXIT] Download failed for media ${remoteMedia.id}")
                             }
                         }
                         mediaEntities.add(mediaEntity)
+                    } else {
+                        Log.w(TAG, "Media ${pm.midia_id} not found.")
                     }
                 }
 
                 if (mediaEntities.isNotEmpty()) {
                     cacheDao.insertMidias(mediaEntities)
+                    Log.d(TAG, "Saved ${mediaEntities.size} medias to local DB.")
                 }
 
                 // Cleanup unused files from media directory
+                Log.d(TAG, "Cleaning up unused media...")
                 downloadManager.cleanupUnusedMedia(activeMediaIds)
+            } else {
+                Log.w(TAG, "No playlist_id resolved for TV or Cliente.")
             }
 
             // Update heartbeat status to remote
+            Log.d(TAG, "Updating TV status to Online...")
             SupabaseManager.updateTvStatus(tvId, "Online", getSystemUptime())
+            Log.d(TAG, "[EXIT] syncData - Sync complete successfully.")
             true
         } catch (e: Exception) {
-            Log.e(TAG, "Sync failed due to exception. Falling back to cache.", e)
+            Log.e(TAG, "[ERROR] syncData - Sync failed due to exception. Falling back to cache.", e)
             false
         }
     }
