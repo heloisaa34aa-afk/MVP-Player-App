@@ -319,8 +319,7 @@ class AppRepository(private val context: Context) {
                         storage_path = media.url_storage,
                         duracao = map.duracao ?: media.duracao,
                         ordem = map.ordem,
-                        cache_path = media.local_file_path,
-                        conteudo_online = (media.origem == "url" || media.tipo == "website") // Adjust as per your logic
+                        cache_path = media.local_file_path
                     )
                 )
             }

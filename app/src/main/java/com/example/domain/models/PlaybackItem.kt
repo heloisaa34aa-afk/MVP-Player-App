@@ -8,6 +8,5 @@ data class PlaybackItem(
     val storage_path: String?,
     val duracao: Int,
     val ordem: Int,
-    val cache_path: String?,
-    val conteudo_online: Boolean
+    val cache_path: String?
 )

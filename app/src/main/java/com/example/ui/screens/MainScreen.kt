@@ -364,10 +364,26 @@ class PlayerViewModel(val repository: AppRepository) : ViewModel() {
         }
     }
 
-    private fun startSlideshowLoop() {
+    fun advanceToNextSlide() {
+        val state = _uiState.value
+        if (state is UiState.Paired && state.slides.isNotEmpty()) {
+            if (state.slides.size > 1) {
+                currentSlideIndex = (currentSlideIndex + 1) % state.slides.size
+                currentSlideTimeElapsed = 0
+                Log.d("PlayerViewModel", "[SYNC]\nMudando para índice (forçado): $currentSlideIndex")
+            } else {
+                currentSlideTimeElapsed = 0
+            }
+            startSlideshowLoop(resetIndex = false)
+        }
+    }
+
+    private fun startSlideshowLoop(resetIndex: Boolean = true) {
         slideChangeJob?.cancel()
         slideChangeJob = viewModelScope.launch {
-            currentSlideIndex = 0
+            if (resetIndex) {
+                currentSlideIndex = 0
+            }
             currentSlideTimeElapsed = 0
 
             while (true) {
@@ -935,7 +951,24 @@ fun PlayerScreen(
     // Single ExoPlayer instance
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
-            repeatMode = Player.REPEAT_MODE_ONE
+            repeatMode = Player.REPEAT_MODE_OFF
+            addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_ENDED) {
+                        val current = slides.getOrNull(currentSlideIndex)
+                        if (current?.tipo == "video") {
+                            Log.d("PlayerScreen", "[SYNC]\nFim do vídeo atingido, avançando slide. Nome: ${current.nome}")
+                            viewModel.advanceToNextSlide()
+                        }
+                    }
+                }
+                
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    val current = slides.getOrNull(currentSlideIndex)
+                    Log.e("PlayerScreen", "[SYNC]\nErro de reprodução!\nID: ${current?.id}\nNome: ${current?.nome}\nErro: ${error.message}")
+                    viewModel.advanceToNextSlide()
+                }
+            })
         }
     }
 
@@ -988,16 +1021,12 @@ fun PlayerScreen(
                 webView.loadUrl("about:blank")
                 webView.onPause()
 
-                val videoUri = if (isOnline) {
+                val localFile = currentItem.cache_path?.let { File(it) }
+                val videoUri = if (localFile != null && localFile.exists() && localFile.length() > 0) {
+                    Uri.fromFile(localFile)
+                } else {
                     val url = currentItem.url ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${currentItem.storage_path}"
                     Uri.parse(url)
-                } else {
-                    if (!currentItem.cache_path.isNullOrEmpty()) {
-                        Uri.fromFile(File(currentItem.cache_path!!))
-                    } else {
-                        val url = currentItem.url ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${currentItem.storage_path}"
-                        Uri.parse(url)
-                    }
                 }
 
                 val mediaItem = MediaItem.fromUri(videoUri)
@@ -1120,14 +1149,11 @@ fun PlayerScreen(
 @Composable
 fun ImageSlide(media: com.example.domain.models.PlaybackItem, isOnline: Boolean) {
     // Prefer absolute local file path if offline, otherwise prefer URL
-    val imageSource = if (isOnline) {
-        media.url ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.storage_path}"
+    val localFile = media.cache_path?.let { File(it) }
+    val imageSource = if (localFile != null && localFile.exists() && localFile.length() > 0) {
+        localFile
     } else {
-        if (!media.cache_path.isNullOrEmpty()) {
-            File(media.cache_path!!)
-        } else {
-            media.url ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.storage_path}"
-        }
+        media.url ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.storage_path}"
     }
 
     Box(
