@@ -145,13 +145,13 @@ object SupabaseManager {
 
     suspend fun getTvByToken(token: String): TvDto? {
         return try {
-            val normalized = token.trim().uppercase().filter { it.isLetterOrDigit() }
-            Log.d(TAG, "[ENTRY] getTvByToken - Token recebido: '$token', Token normalizado: '$normalized'")
+            val formattedToken = token.trim().uppercase()
+            Log.d(TAG, "[ENTRY] getTvByToken - Token recebido: '$token', Token formatado: '$formattedToken'")
             
-            Log.d(TAG, "[DEBUG] Consulta enviada ao Supabase para a tabela 'tvs' filtrando token='$normalized'")
+            Log.d(TAG, "[DEBUG] Consulta enviada ao Supabase para a tabela 'tvs' filtrando token='$formattedToken'")
             val response = supabaseClient.postgrest["tvs"].select {
                 filter {
-                    eq("token", normalized)
+                    eq("token", formattedToken)
                 }
             }
             

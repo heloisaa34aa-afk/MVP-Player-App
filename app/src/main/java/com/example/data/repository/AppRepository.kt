@@ -77,10 +77,10 @@ class AppRepository(private val context: Context) {
     // --- Pairing logic ---
 
     /**
-     * Normalizes a token using exact rules: trim, uppercase, remove anything that is not alphanumeric.
+     * Normalizes a token using exact rules: trim and uppercase (keeps hyphens).
      */
     fun normalizeToken(token: String): String {
-        return token.trim().uppercase().filter { it.isLetterOrDigit() }
+        return token.trim().uppercase()
     }
 
     /**
