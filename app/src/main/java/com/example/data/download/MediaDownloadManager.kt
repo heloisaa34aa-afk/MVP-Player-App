@@ -134,4 +134,28 @@ class MediaDownloadManager(private val context: Context) {
             Log.e(TAG, "Error during cleanup", e)
         }
     }
+
+    fun getCacheSize(): Long {
+        return try {
+            mediaDir.listFiles()?.sumOf { it.length() } ?: 0L
+        } catch (e: Exception) {
+            0L
+        }
+    }
+
+    fun getCachedMediaCount(): Int {
+        return try {
+            mediaDir.listFiles()?.size ?: 0
+        } catch (e: Exception) {
+            0
+        }
+    }
+
+    fun clearAll() {
+        try {
+            mediaDir.listFiles()?.forEach { it.delete() }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error clearing media cache", e)
+        }
+    }
 }

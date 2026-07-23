@@ -113,6 +113,29 @@ interface CacheDao {
 
     @Query("DELETE FROM midias WHERE id = :id")
     suspend fun deleteMidia(id: String)
+
+    @Query("DELETE FROM tvs")
+    suspend fun clearTvs()
+
+    @Query("DELETE FROM clientes")
+    suspend fun clearClientes()
+
+    @Query("DELETE FROM playlists")
+    suspend fun clearPlaylists()
+
+    @Query("DELETE FROM playlist_midias")
+    suspend fun clearPlaylistMidias()
+
+    @Query("DELETE FROM midias")
+    suspend fun clearMidias()
+
+    suspend fun clearAll() {
+        clearTvs()
+        clearClientes()
+        clearPlaylists()
+        clearPlaylistMidias()
+        clearMidias()
+    }
 }
 
 @Database(

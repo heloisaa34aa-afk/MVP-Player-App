@@ -88,7 +88,7 @@ data class TvStatusUpdate(
     val status: String,
     val uptime: String,
     val ultima_conexao: String,
-    val ultima_sincronizacao: String
+    val ultima_sincronizacao: String? = null
 )
 
 object SupabaseManager {
@@ -263,7 +263,7 @@ object SupabaseManager {
         }
     }
 
-    suspend fun updateTvStatus(tvId: String, status: String, uptime: String) {
+    suspend fun updateTvStatus(tvId: String, status: String, uptime: String, ultimaSincronizacao: String? = null) {
         try {
             Log.d(TAG, "[ENTRY] updateTvStatus - TV ID: $tvId, Status: $status, Uptime: $uptime")
             val nowStr = OffsetDateTime.now().toString()
@@ -271,7 +271,7 @@ object SupabaseManager {
                 status = status,
                 uptime = uptime,
                 ultima_conexao = nowStr,
-                ultima_sincronizacao = nowStr
+                ultima_sincronizacao = ultimaSincronizacao ?: nowStr
             )
             supabaseClient.postgrest["tvs"].update(update) {
                 filter {

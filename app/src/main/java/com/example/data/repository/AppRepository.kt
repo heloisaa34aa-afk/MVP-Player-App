@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.room.Room
+import kotlinx.coroutines.flow.first
 import com.example.data.download.MediaDownloadManager
 import com.example.data.local.AppDatabase
 import com.example.data.local.CacheDao
@@ -23,6 +24,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import java.time.OffsetDateTime
 
 val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "vision_settings")
@@ -43,6 +45,7 @@ class AppRepository(private val context: Context) {
         private const val TAG = "AppRepository"
         val DEVICE_TOKEN_KEY = stringPreferencesKey("device_token")
         val TV_ID_KEY = stringPreferencesKey("tv_id")
+        val LAST_SYNC_TIME_KEY = stringPreferencesKey("last_sync_time")
     }
 
     // --- Preference flows ---
@@ -67,10 +70,22 @@ class AppRepository(private val context: Context) {
         }
     }
 
+    suspend fun saveLastSyncTime(timeStr: String) {
+        context.dataStore.edit { prefs ->
+            prefs[LAST_SYNC_TIME_KEY] = timeStr
+        }
+    }
+
+    suspend fun getLastSyncTime(): String? {
+        val prefs = context.dataStore.data.first()
+        return prefs[LAST_SYNC_TIME_KEY]
+    }
+
     suspend fun clearDevicePairing() {
         context.dataStore.edit { prefs ->
             prefs.remove(DEVICE_TOKEN_KEY)
             prefs.remove(TV_ID_KEY)
+            prefs.remove(LAST_SYNC_TIME_KEY)
         }
     }
 
@@ -211,17 +226,10 @@ class AppRepository(private val context: Context) {
                             url_externa = remoteMedia.url_externa,
                             duracao = remoteMedia.duracao
                         )
-
-                        // If media source is storage, download and save locally
-                        if (remoteMedia.origem == "storage" && (remoteMedia.tipo == "image" || remoteMedia.tipo == "video")) {
-                            Log.d(TAG, "[ENTRY] Downloading media ${remoteMedia.id}...")
-                            val localPath = downloadManager.downloadMedia(mediaEntity)
-                            if (localPath != null) {
-                                Log.d(TAG, "[EXIT] Downloaded media ${remoteMedia.id} to $localPath")
-                                mediaEntity.local_file_path = localPath
-                            } else {
-                                Log.w(TAG, "[EXIT] Download failed for media ${remoteMedia.id}")
-                            }
+                        // Preserve existing local_file_path if it exists
+                        val existing = cacheDao.getMidia(mediaEntity.id)
+                        if (existing != null) {
+                            mediaEntity.local_file_path = existing.local_file_path
                         }
                         mediaEntities.add(mediaEntity)
                     } else {
@@ -234,16 +242,35 @@ class AppRepository(private val context: Context) {
                     Log.d(TAG, "Saved ${mediaEntities.size} medias to local DB.")
                 }
 
-                // Cleanup unused files from media directory
-                Log.d(TAG, "Cleaning up unused media...")
-                downloadManager.cleanupUnusedMedia(activeMediaIds)
+                // Launch downloads in background so it doesn't block playback
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    Log.d(TAG, "Background download started...")
+                    for (mediaEntity in mediaEntities) {
+                        if (mediaEntity.origem == "storage" && (mediaEntity.tipo == "image" || mediaEntity.tipo == "video")) {
+                            Log.d(TAG, "[ENTRY] Downloading media ${mediaEntity.id}...")
+                            val localPath = downloadManager.downloadMedia(mediaEntity)
+                            if (localPath != null) {
+                                Log.d(TAG, "[EXIT] Downloaded media ${mediaEntity.id} to $localPath")
+                                mediaEntity.local_file_path = localPath
+                                cacheDao.insertMidias(listOf(mediaEntity)) // Update DB with local path
+                            } else {
+                                Log.w(TAG, "[EXIT] Download failed for media ${mediaEntity.id}")
+                            }
+                        }
+                    }
+                    // Cleanup unused files from media directory
+                    Log.d(TAG, "Cleaning up unused media...")
+                    downloadManager.cleanupUnusedMedia(activeMediaIds)
+                }
             } else {
                 Log.w(TAG, "No playlist_id resolved for TV or Cliente.")
             }
 
             // Update heartbeat status to remote
             Log.d(TAG, "Updating TV status to Online...")
-            SupabaseManager.updateTvStatus(tvId, "Online", getSystemUptime())
+            val nowStr = OffsetDateTime.now().toString()
+            saveLastSyncTime(nowStr)
+            SupabaseManager.updateTvStatus(tvId, "Online", getSystemUptime(), nowStr)
             Log.d(TAG, "[EXIT] syncData - Sync complete successfully.")
             true
         } catch (e: Exception) {
@@ -274,11 +301,14 @@ class AppRepository(private val context: Context) {
     /**
      * Updates the heartbeat online status on Supabase.
      */
-    suspend fun updateHeartbeat(tvId: String) {
-        try {
-            SupabaseManager.updateTvStatus(tvId, "Online", getSystemUptime())
+    suspend fun updateHeartbeat(tvId: String, status: String = "Online"): Boolean {
+        return try {
+            val lastSync = getLastSyncTime()
+            SupabaseManager.updateTvStatus(tvId, status, getSystemUptime(), lastSync)
+            true
         } catch (e: Exception) {
-            Log.e(TAG, "Heartbeat failed", e)
+            Log.e(TAG, "Heartbeat failed for status $status", e)
+            false
         }
     }
 
@@ -289,6 +319,25 @@ class AppRepository(private val context: Context) {
         val hours = (uptimeMs / (1000 * 60 * 60)) % 24
         val days = uptimeMs / (1000 * 60 * 60 * 24)
         return "${days}d ${hours}h ${minutes}m ${seconds}s"
+    }
+
+    suspend fun checkConfigurationChanges(tvId: String): Boolean {
+        return try {
+            val remoteTv = SupabaseManager.getTvById(tvId) ?: return false
+            val localTv = cacheDao.getTv(tvId) ?: return true
+            
+            remoteTv.playlist_id != localTv.playlist_id ||
+            remoteTv.nome != localTv.nome ||
+            remoteTv.rotacao != localTv.rotacao ||
+            remoteTv.texto_superior != localTv.texto_superior ||
+            remoteTv.texto_superior_visivel != localTv.texto_superior_visivel ||
+            remoteTv.texto_inferior != localTv.texto_inferior ||
+            remoteTv.texto_inferior_visivel != localTv.texto_inferior_visivel ||
+            remoteTv.volume != localTv.volume ||
+            remoteTv.tempo_transicao != localTv.tempo_transicao
+        } catch (e: Exception) {
+            false
+        }
     }
 
     suspend fun hasTvContentChanges(tvId: String, recordJson: String): Boolean {
@@ -324,5 +373,20 @@ class AppRepository(private val context: Context) {
             Log.e(TAG, "Error comparing TV content changes, defaulting to true", e)
             true
         }
+    }
+
+    suspend fun clearAllData() {
+        Log.d(TAG, "Clearing all local data and unlinking device.")
+        clearDevicePairing()
+        cacheDao.clearAll()
+        downloadManager.clearAll()
+    }
+
+    fun getCacheSizeMB(): Double {
+        return downloadManager.getCacheSize().toDouble() / (1024 * 1024)
+    }
+
+    fun getCachedMediaCount(): Int {
+        return downloadManager.getCachedMediaCount()
     }
 }

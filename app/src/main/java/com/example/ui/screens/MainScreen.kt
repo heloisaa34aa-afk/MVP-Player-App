@@ -104,6 +104,9 @@ import com.example.data.remote.SupabaseManager
 import com.example.data.repository.AppRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -127,7 +130,7 @@ sealed interface UiState {
     ) : UiState
 }
 
-class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
+class PlayerViewModel(val repository: AppRepository) : ViewModel() {
     private val _uiState = MutableStateFlow<UiState>(UiState.Checking)
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
@@ -136,6 +139,10 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
     private var loopTimerJob: Job? = null
     private var slideChangeJob: Job? = null
     private var pairingPollJob: Job? = null
+
+    // Network status
+    var isOnline by mutableStateOf(true)
+        private set
 
     // Slideshow local controls
     var currentSlideIndex by mutableIntStateOf(0)
@@ -288,15 +295,20 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
         }
     }
 
-    // Active in-memory backup loop (runs heartbeats and fallback syncs every 5 minutes)
+    // Active in-memory backup loop (runs heartbeats and fallback syncs every 10 seconds)
     private fun startHeartbeatLoop(tvId: String) {
         loopTimerJob?.cancel()
-        loopTimerJob = viewModelScope.launch {
+        loopTimerJob = viewModelScope.launch(Dispatchers.IO) {
             while (true) {
-                delay(300 * 1000) // 5 minutes
+                delay(10 * 1000) // 10 seconds
                 Log.d("PlayerViewModel", "Heartbeat tick. Updating online status.")
-                repository.updateHeartbeat(tvId)
-                triggerFullSync(tvId)
+                val online = repository.updateHeartbeat(tvId)
+                isOnline = online
+                
+                if (online && repository.checkConfigurationChanges(tvId)) {
+                    Log.d("PlayerViewModel", "Configuration changes detected during heartbeat. Triggering full sync.")
+                    triggerFullSync(tvId)
+                }
             }
         }
     }
@@ -372,22 +384,40 @@ class PlayerViewModel(private val repository: AppRepository) : ViewModel() {
 
     fun disconnectDevice() {
         viewModelScope.launch {
+            val tvId = (_uiState.value as? UiState.Paired)?.tv?.id
+            if (tvId != null) {
+                repository.updateHeartbeat(tvId, "Offline")
+            }
+            
             activeSyncJob?.cancel()
             realtimeJob?.cancel()
             loopTimerJob?.cancel()
             slideChangeJob?.cancel()
 
-            repository.clearDevicePairing()
+            repository.clearAllData()
             checkPairingStatus()
         }
     }
 
     override fun onCleared() {
         super.onCleared()
+        val tvId = (_uiState.value as? UiState.Paired)?.tv?.id
+        if (tvId != null) {
+            runBlocking {
+                try {
+                    withTimeout(2000) {
+                        repository.updateHeartbeat(tvId, "Offline")
+                    }
+                } catch (e: Exception) {
+                    Log.e("PlayerViewModel", "Failed to set offline status on exit", e)
+                }
+            }
+        }
         activeSyncJob?.cancel()
         realtimeJob?.cancel()
         loopTimerJob?.cancel()
         slideChangeJob?.cancel()
+        pairingPollJob?.cancel()
     }
 }
 
@@ -418,6 +448,7 @@ fun MainScreen(viewModel: PlayerViewModel) {
                     slides = state.slides,
                     currentSlideIndex = viewModel.currentSlideIndex,
                     isSyncing = state.isSyncing,
+                    viewModel = viewModel,
                     onDisconnect = { viewModel.disconnectDevice() },
                     onRefresh = { viewModel.triggerFullSync(state.tvId) }
                 )
@@ -840,11 +871,13 @@ fun PlayerScreen(
     slides: List<Pair<PlaylistMidiaEntity, MidiaEntity>>,
     currentSlideIndex: Int,
     isSyncing: Boolean,
+    viewModel: PlayerViewModel,
     onDisconnect: () -> Unit,
     onRefresh: () -> Unit
 ) {
     // Apply Rotation based on tv.rotacao (0, 90, 180, 270)
     val rotationAngle = tv?.rotacao ?: 0
+    val isOnline = viewModel.isOnline
 
     Box(
         modifier = Modifier
@@ -867,9 +900,9 @@ fun PlayerScreen(
                     Crossfade(targetState = currentSlide, label = "SlideCrossfade") { slide ->
                         val midia = slide.second
                         when (midia.tipo) {
-                            "image" -> ImageSlide(media = midia)
-                            "video" -> VideoSlide(media = midia, volume = tv?.volume ?: 100)
-                            else -> WebSlide(media = midia) // website, instagram, youtube, google_maps, canva
+                            "image" -> ImageSlide(media = midia, isOnline = isOnline)
+                            "video" -> VideoSlide(media = midia, volume = tv?.volume ?: 100, isOnline = isOnline)
+                            else -> WebSlide(media = midia, isOnline = isOnline) // website, instagram, youtube, google_maps, canva
                         }
                     }
                 }
@@ -879,25 +912,53 @@ fun PlayerScreen(
             OverlaysContainer(tv = tv, cliente = cliente)
         }
 
-        // Invisible management settings drawer trigger (Bottom-left hidden corner to disconnect/troubleshoot)
+        // Invisible management settings drawer trigger (Bottom-right hidden corner to disconnect/troubleshoot)
         Box(
             modifier = Modifier
-                .size(48.dp)
-                .align(Alignment.BottomStart)
+                .size(64.dp)
+                .align(Alignment.BottomEnd)
+                .padding(bottom = 16.dp, end = 16.dp)
                 .testTag("hidden_admin_corner")
         ) {
             var showAdminMenu by remember { mutableStateOf(false) }
+            var clickCount by remember { mutableIntStateOf(0) }
+            var lastClickTime by remember { mutableStateOf(0L) }
 
             Button(
-                onClick = { showAdminMenu = !showAdminMenu },
+                onClick = { 
+                    val now = System.currentTimeMillis()
+                    if (now - lastClickTime > 2000) {
+                        clickCount = 1
+                    } else {
+                        clickCount++
+                    }
+                    lastClickTime = now
+                    if (clickCount >= 3) {
+                        showAdminMenu = true
+                        clickCount = 0
+                    }
+                },
                 colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
                 modifier = Modifier.fillMaxSize()
-            ) {}
+            ) {
+                // Opacity between 15% and 20%
+                Icon(
+                    imageVector = Icons.Default.DesktopMac, // Used as placeholder for Vision Central logo
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.15f),
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
 
             if (showAdminMenu) {
                 AdminDialog(
                     tvName = tv?.nome ?: "Desconhecido",
                     token = tv?.token ?: "",
+                    clienteName = cliente?.nome ?: "N/A",
+                    playlistName = "Playlist Oculta", // Just placeholder, can't easily get playlist name without DB join
+                    status = if (isOnline) "Online" else "Offline",
+                    lastSync = tv?.uptime ?: "Recente", // Need to get last sync, fallback to uptime
+                    viewModel = viewModel,
                     onDisconnect = {
                         showAdminMenu = false
                         onDisconnect()
@@ -916,12 +977,16 @@ fun PlayerScreen(
 // --- Individual Slide Renderers ---
 
 @Composable
-fun ImageSlide(media: MidiaEntity) {
-    // Prefer absolute local file path for reliable offline playback, fallback to URL
-    val imageSource = if (!media.local_file_path.isNullOrEmpty()) {
-        File(media.local_file_path!!)
-    } else {
+fun ImageSlide(media: MidiaEntity, isOnline: Boolean) {
+    // Prefer absolute local file path if offline, otherwise prefer URL
+    val imageSource = if (isOnline) {
         media.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.url_storage}"
+    } else {
+        if (!media.local_file_path.isNullOrEmpty()) {
+            File(media.local_file_path!!)
+        } else {
+            media.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.url_storage}"
+        }
     }
 
     Box(
@@ -940,19 +1005,24 @@ fun ImageSlide(media: MidiaEntity) {
 
 @OptIn(UnstableApi::class)
 @Composable
-fun VideoSlide(media: MidiaEntity, volume: Int) {
+fun VideoSlide(media: MidiaEntity, volume: Int, isOnline: Boolean) {
     val context = LocalContext.current
     
-    val videoUri = remember(media) {
-        if (!media.local_file_path.isNullOrEmpty()) {
-            Uri.fromFile(File(media.local_file_path!!))
-        } else {
+    val videoUri = remember(media, isOnline) {
+        if (isOnline) {
             val url = media.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.url_storage}"
             Uri.parse(url)
+        } else {
+            if (!media.local_file_path.isNullOrEmpty()) {
+                Uri.fromFile(File(media.local_file_path!!))
+            } else {
+                val url = media.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.url_storage}"
+                Uri.parse(url)
+            }
         }
     }
 
-    val exoPlayer = remember(media) {
+    val exoPlayer = remember(media, isOnline) {
         ExoPlayer.Builder(context).build().apply {
             val mediaItem = MediaItem.fromUri(videoUri)
             setMediaItem(mediaItem)
@@ -994,12 +1064,36 @@ fun VideoSlide(media: MidiaEntity, volume: Int) {
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun WebSlide(media: MidiaEntity) {
+fun WebSlide(media: MidiaEntity, isOnline: Boolean) {
     val rawUrl = media.url_externa ?: "${BuildConfig.SUPABASE_URL}/storage/v1/object/public/midias/${media.url_storage}" ?: "about:blank"
     
     // Auto convert standard YouTube links to full-screen embeds to prevent clicking "Play"
     val resolvedUrl = remember(rawUrl) {
         resolveEmbedUrl(rawUrl, media.tipo)
+    }
+
+    if (!isOnline) {
+        Box(
+            modifier = Modifier.fillMaxSize().background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    imageVector = Icons.Default.SignalCellularConnectedNoInternet0Bar,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(64.dp)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "Conteúdo indisponível offline",
+                    color = Color.White,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+        return
     }
 
     var isLoading by remember { mutableStateOf(true) }
@@ -1291,19 +1385,21 @@ fun EmptyPlaylistPlaceholder(isSyncing: Boolean, onRefresh: () -> Unit) {
             )
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "Sem Conteúdo Ativo",
+                text = if (isSyncing) "Sincronizando conteúdo..." else "Sem Conteúdo Ativo",
                 color = Color.White,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.SemiBold
             )
             Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "Esta tela está vinculada, mas não há nenhuma mídias na playlist selecionada.",
-                color = Color(0xFF938F99), // Sleek tertiary color
-                fontSize = 14.sp,
-                textAlign = TextAlign.Center,
-                lineHeight = 20.sp
-            )
+            if (!isSyncing) {
+                Text(
+                    text = "Esta tela está vinculada, mas não há nenhuma mídia na playlist selecionada.",
+                    color = Color(0xFF938F99), // Sleek tertiary color
+                    fontSize = 14.sp,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 20.sp
+                )
+            }
             Spacer(modifier = Modifier.height(24.dp))
             Button(
                 onClick = onRefresh,
@@ -1335,6 +1431,11 @@ fun EmptyPlaylistPlaceholder(isSyncing: Boolean, onRefresh: () -> Unit) {
 fun AdminDialog(
     tvName: String,
     token: String,
+    clienteName: String,
+    playlistName: String,
+    status: String,
+    lastSync: String,
+    viewModel: PlayerViewModel,
     onDisconnect: () -> Unit,
     onRefresh: () -> Unit,
     onDismiss: () -> Unit
@@ -1344,7 +1445,7 @@ fun AdminDialog(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
             shape = RoundedCornerShape(16.dp),
             modifier = Modifier
-                .width(360.dp)
+                .width(400.dp)
                 .padding(16.dp)
         ) {
             Column(
@@ -1361,48 +1462,75 @@ fun AdminDialog(
                 Text(
                     text = "Vision Central Player",
                     color = Color.White,
-                    fontSize = 18.sp,
+                    fontSize = 20.sp,
                     fontWeight = FontWeight.Bold
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "Tela: $tvName",
-                    color = Color(0xFFCBD5E1),
-                    fontSize = 14.sp,
-                    textAlign = TextAlign.Center
-                )
-                Text(
-                    text = "Token: $token",
-                    color = Color(0xFF94A3B8),
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                // Details Grid
+                Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AdminDetailRow("Token vinculado:", token)
+                    AdminDetailRow("Nome da TV:", tvName)
+                    AdminDetailRow("Cliente:", clienteName)
+                    AdminDetailRow("Playlist:", playlistName)
+                    AdminDetailRow("Status:", status)
+                    AdminDetailRow("Última sincronização:", lastSync)
+                    AdminDetailRow("Versão do aplicativo:", BuildConfig.VERSION_NAME)
+                    AdminDetailRow("Uso de armazenamento local:", String.format("%.1f MB", viewModel.repository.getCacheSizeMB()))
+                    AdminDetailRow("Quantidade de mídias em cache:", "${viewModel.repository.getCachedMediaCount()}")
+                }
+                
                 Spacer(modifier = Modifier.height(24.dp))
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     Button(
                         onClick = onRefresh,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3B82F6)),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Sincronizar Agora", color = Color.White)
+                    }
+                    
+                    Button(
+                        onClick = { /* Not implemented yet, just visual */ },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155)),
                         shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Sincronizar", color = Color.White)
+                        Text("Verificar Atualizações", color = Color.White)
                     }
-                    Spacer(modifier = Modifier.width(12.dp))
+                    
                     Button(
                         onClick = onDisconnect,
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
                         shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Desconectar", color = Color.White)
+                        Text("Desvincular Dispositivo", color = Color.White)
+                    }
+                    
+                    Button(
+                        onClick = onDismiss,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Fechar", color = Color(0xFF94A3B8))
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+fun AdminDetailRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(text = label, color = Color(0xFF94A3B8), fontSize = 14.sp)
+        Text(text = value, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
     }
 }
